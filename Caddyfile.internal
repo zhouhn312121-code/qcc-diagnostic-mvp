@@ -1,0 +1,32 @@
+{
+  default_sni {$QCC_HOST}
+}
+
+http://{$QCC_HOST} {
+  handle /.well-known/acme-challenge/* {
+    root * /var/www/certbot
+    file_server
+  }
+
+  redir https://{$QCC_HOST}{uri} permanent
+}
+
+https://{$QCC_HOST} {
+  encode zstd gzip
+  tls internal
+
+  route {
+    handle /.well-known/acme-challenge/* {
+      root * /var/www/certbot
+      file_server
+    }
+
+    handle {
+      basic_auth {
+        {$QCC_AUTH_USER} {$QCC_AUTH_PASSWORD_HASH}
+      }
+
+      reverse_proxy qcc:3000
+    }
+  }
+}

@@ -1,0 +1,43 @@
+services:
+  qcc:
+    build:
+      context: .
+    restart: unless-stopped
+    env_file:
+      - .env.deploy
+    environment:
+      DATABASE_PATH: /app/data/qcc.db
+    volumes:
+      - ./runtime/data:/app/data
+    expose:
+      - "3000"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - qcc
+    env_file:
+      - .env.deploy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./runtime/certbot/www:/var/www/certbot:ro
+      - ./runtime/letsencrypt:/etc/letsencrypt:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  certbot:
+    image: certbot/certbot:v5.4.0
+    profiles:
+      - ops
+    volumes:
+      - ./runtime/certbot/www:/var/www/certbot
+      - ./runtime/letsencrypt:/etc/letsencrypt
+
+volumes:
+  caddy_data:
+  caddy_config:

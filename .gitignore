@@ -1,0 +1,10 @@
+node_modules/
+.next/
+.env.local
+.env.deploy
+data/*.db
+data/*.db-shm
+data/*.db-wal
+runtime/
+coverage/
+*.log

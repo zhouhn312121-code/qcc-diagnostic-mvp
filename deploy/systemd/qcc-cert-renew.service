@@ -1,0 +1,11 @@
+[Unit]
+Description=Renew QCC Let's Encrypt IP certificate
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/qcc
+Environment=PROJECT_DIR=/opt/qcc
+Environment=CERT_NAME=1.14.142.128
+ExecStart=/opt/qcc/scripts/certbot-renew.sh
