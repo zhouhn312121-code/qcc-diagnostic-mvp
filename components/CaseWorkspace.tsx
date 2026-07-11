@@ -7,6 +7,7 @@ import { ArrowLeft, BookOpenCheck, CheckCircle2, Clipboard, Download, FileSearch
 import { caseProgress, emptyStep, hasProcessLoop, processIssues, readinessIssues, syncAutoTransitions } from "@/lib/case-utils";
 import { makeId } from "@/lib/ids";
 import { problemTypes, type CauseHypothesis, type Countermeasure, type ProcessFinding, type ProcessStep, type ProcessTransition, type QccCase } from "@/lib/types";
+import type { ModelOption } from "@/lib/ai";
 
 const stages = [
   { id: 1, label: "问题与流程", icon: GitBranch },
@@ -33,7 +34,7 @@ function Field({ label, value, onChange, placeholder, full, textarea, help }: { 
   );
 }
 
-export function CaseWorkspace({ initialCase }: { initialCase: QccCase }) {
+export function CaseWorkspace({ initialCase, modelOptions }: { initialCase: QccCase; modelOptions: ModelOption[] }) {
   const [item, setItem] = useState(initialCase);
   const [activeStage, setActiveStage] = useState(Math.min(initialCase.stage, 5));
   const [dirty, setDirty] = useState(false);
@@ -122,7 +123,8 @@ export function CaseWorkspace({ initialCase }: { initialCase: QccCase }) {
       const response = await fetch("/api/diagnose", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ caseId: item.id }) });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "诊断失败");
-      setItem(data.case); setDirty(false); setActiveStage(2); notify(`诊断完成 · ${data.engine}`);
+      const modelLabel = modelOptions.find((option) => option.id === data.model)?.label || data.engine;
+      setItem(data.case); setDirty(false); setActiveStage(2); notify(data.engine === "AI失败后规则引擎" ? `${modelLabel}调用失败，已使用规则引擎完成诊断` : `诊断完成 · ${modelLabel}`);
     } catch (error) { notify(error instanceof Error ? error.message : "诊断失败"); }
     finally { setRunning(null); }
   }
@@ -136,7 +138,8 @@ export function CaseWorkspace({ initialCase }: { initialCase: QccCase }) {
       const response = await fetch("/api/solutions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ caseId: item.id }) });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "方案生成失败");
-      setItem(data.case); setDirty(false); setActiveStage(4); notify(`方案生成完成 · ${data.engine}`);
+      const modelLabel = modelOptions.find((option) => option.id === data.model)?.label || data.engine;
+      setItem(data.case); setDirty(false); setActiveStage(4); notify(data.engine === "AI失败后规则引擎" ? `${modelLabel}调用失败，已使用规则引擎生成方案` : `方案生成完成 · ${modelLabel}`);
     } catch (error) { notify(error instanceof Error ? error.message : "方案生成失败"); }
     finally { setRunning(null); }
   }
@@ -194,7 +197,7 @@ export function CaseWorkspace({ initialCase }: { initialCase: QccCase }) {
           </div>
         </header>
         <div className="content">
-          {activeStage === 1 && <ProblemStage item={item} updateField={updateField} update={update} updateStep={updateStep} runDiagnosis={runDiagnosis} issues={issues} running={running} />}
+          {activeStage === 1 && <ProblemStage item={item} updateField={updateField} update={update} updateStep={updateStep} runDiagnosis={runDiagnosis} issues={issues} running={running} modelOptions={modelOptions} />}
           {activeStage === 2 && <DiagnosisStage item={item} issues={issues} runDiagnosis={runDiagnosis} running={running} updateFinding={updateFinding} goNext={() => setActiveStage(3)} />}
           {activeStage === 3 && <VerificationStage item={item} updateCause={updateCause} generateSolutions={generateSolutions} running={running} />}
           {activeStage === 4 && <SolutionStage item={item} updateMeasure={updateMeasure} generateSolutions={generateSolutions} running={running} goNext={() => setActiveStage(5)} />}
@@ -207,9 +210,12 @@ export function CaseWorkspace({ initialCase }: { initialCase: QccCase }) {
   );
 }
 
-function ProblemStage({ item, updateField, update, updateStep, runDiagnosis, issues, running }: { item: QccCase; updateField: <K extends keyof QccCase>(key: K, value: QccCase[K]) => void; update: (item: QccCase) => void; updateStep: (index: number, key: keyof QccCase["steps"][number], value: ProcessStep[keyof ProcessStep]) => void; runDiagnosis: () => void; issues: string[]; running: string | null }) {
+function ProblemStage({ item, updateField, update, updateStep, runDiagnosis, issues, running, modelOptions }: { item: QccCase; updateField: <K extends keyof QccCase>(key: K, value: QccCase[K]) => void; update: (item: QccCase) => void; updateStep: (index: number, key: keyof QccCase["steps"][number], value: ProcessStep[keyof ProcessStep]) => void; runDiagnosis: () => void; issues: string[]; running: string | null; modelOptions: ModelOption[] }) {
   const [flowTab, setFlowTab] = useState<"table" | "diagram">("table");
   const [editingStepId, setEditingStepId] = useState<string | null>(null);
+  const defaultModel = modelOptions.find((option) => option.id !== "rules")?.id || "rules";
+  const selectedModel = item.diagnosisModel || defaultModel;
+  const selectedModelOption = modelOptions.find((option) => option.id === selectedModel) || modelOptions[0];
   function commit(next: QccCase) { update(syncAutoTransitions({ ...next, steps: next.steps.map((step, index) => ({ ...step, order: index + 1 })) })); }
   function changeNodeType(index: number, nodeType: ProcessStep["nodeType"]) {
     const steps = [...item.steps]; const step = steps[index];
@@ -280,6 +286,7 @@ function ProblemStage({ item, updateField, update, updateStep, runDiagnosis, iss
     {editingStepId && <TransitionDrawer item={item} stepId={editingStepId} update={commit} close={() => setEditingStepId(null)} />}
     <div className={`callout ${issues.length ? "warn" : "success"}`}><ShieldAlert size={19}/><div><strong>{issues.length ? `诊断前还需补充${issues.length}项` : "信息完整，可以开始诊断"}</strong>{issues.length > 0 && <ul className="issues">{issues.map((x) => <li key={x}>{x}</li>)}</ul>}</div></div>
     <label className="callout info" style={{ cursor: "pointer" }}><input type="checkbox" checked={item.sanitizedConfirmed} onChange={(e) => updateField("sanitizedConfirmed", e.target.checked)} /><div><strong>我确认资料已经脱敏</strong><br/>不包含客户名称、人员姓名、合同编号或其他敏感数据。</div></label>
+    <div className="model-picker"><div><label htmlFor="diagnosis-model">诊断模型</label><p>{selectedModelOption?.description}</p></div><select id="diagnosis-model" value={selectedModel} onChange={(event) => updateField("diagnosisModel", event.target.value)} disabled={running === "diagnose"}>{modelOptions.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select></div>
     <button className="btn blue" disabled={issues.length > 0 || running === "diagnose"} onClick={runDiagnosis}>{running === "diagnose" ? <span className="spinner"/> : <Sparkles size={17}/>}开始流程断点诊断</button>
   </>;
 }

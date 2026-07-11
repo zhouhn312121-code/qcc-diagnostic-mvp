@@ -4,14 +4,40 @@ import type { CauseHypothesis, Countermeasure, ProcessFinding, QccCase } from ".
 
 const baseUrl = process.env.AI_BASE_URL?.replace(/\/$/, "");
 const apiKey = process.env.AI_API_KEY;
-const model = process.env.AI_MODEL;
+const defaultModel = process.env.AI_MODEL;
+const configuredModels = [...new Set((process.env.AI_MODELS || defaultModel || "").split(",").map((value) => value.trim()).filter(Boolean))];
 
-export function aiConfigured() {
-  return Boolean(baseUrl && apiKey && model);
+export interface ModelOption {
+  id: string;
+  label: string;
+  description: string;
 }
 
-async function chatJson(system: string, payload: unknown): Promise<unknown> {
-  if (!baseUrl || !apiKey || !model) throw new Error("AI is not configured");
+function modelLabel(model: string) {
+  if (model === "deepseek-v4-flash") return "DeepSeek V4 Flash";
+  if (model === "deepseek-v4-pro") return "DeepSeek V4 Pro";
+  return model;
+}
+
+export function getModelOptions(): ModelOption[] {
+  return [
+    { id: "rules", label: "规则引擎", description: "速度快，不调用外部模型" },
+    ...configuredModels.map((model) => ({ id: model, label: modelLabel(model), description: model.includes("flash") ? "响应更快，适合常规诊断" : "分析更深入，耗时可能更长" })),
+  ];
+}
+
+export function resolveModel(requested?: string) {
+  if (requested === "rules") return "rules";
+  if (requested && configuredModels.includes(requested)) return requested;
+  return defaultModel && configuredModels.includes(defaultModel) ? defaultModel : "rules";
+}
+
+export function aiConfigured(model = defaultModel) {
+  return Boolean(baseUrl && apiKey && model && configuredModels.includes(model));
+}
+
+async function chatJson(model: string, system: string, payload: unknown): Promise<unknown> {
+  if (!baseUrl || !apiKey || !configuredModels.includes(model)) throw new Error("AI is not configured");
   const response = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
     body: JSON.stringify({ model, temperature: 0, response_format: { type: "json_object" },
@@ -26,8 +52,8 @@ async function chatJson(system: string, payload: unknown): Promise<unknown> {
   return JSON.parse(content);
 }
 
-export async function diagnoseWithAi(item: QccCase): Promise<{ findings: ProcessFinding[]; hypotheses: CauseHypothesis[] }> {
-  const raw = await chatJson(`你是一名严谨的QCC流程诊断辅导员。只依据用户提供的事实诊断责任、交接、规则、控制、数据、异常闭环六类断点。不得把假设写成真因。每个finding的evidence必须引用具体流程步骤或缺失信息。
+export async function diagnoseWithAi(item: QccCase, model: string): Promise<{ findings: ProcessFinding[]; hypotheses: CauseHypothesis[] }> {
+  const raw = await chatJson(model, `你是一名严谨的QCC流程诊断辅导员。只依据用户提供的事实诊断责任、交接、规则、控制、数据、异常闭环六类断点。不得把假设写成真因。每个finding的evidence必须引用具体流程步骤或缺失信息。
 
 只输出一个JSON对象，不得使用中文字段名，不得增加包装层。字段名、类型和枚举必须与下面完全一致，所有字段必填：
 {
@@ -70,9 +96,9 @@ export async function diagnoseWithAi(item: QccCase): Promise<{ findings: Process
   return { findings, hypotheses };
 }
 
-export async function solutionsWithAi(item: QccCase): Promise<Countermeasure[]> {
+export async function solutionsWithAi(item: QccCase, model: string): Promise<Countermeasure[]> {
   const supported = item.hypotheses.filter((cause) => cause.status === "证据支持");
-  const raw = await chatJson(`你是一名制造与供应链流程改善顾问。只能针对证据支持的原因生成方案，每个原因分别给快速改善、流程机制、数字化支持三类方案。数字化方案不得建议重大系统重建。
+  const raw = await chatJson(model, `你是一名制造与供应链流程改善顾问。只能针对证据支持的原因生成方案，每个原因分别给快速改善、流程机制、数字化支持三类方案。数字化方案不得建议重大系统重建。
 
 只输出一个JSON对象，不得使用中文字段名，不得增加包装层。字段名、类型和枚举必须与下面完全一致，所有字段必填：
 {
@@ -100,4 +126,4 @@ export async function solutionsWithAi(item: QccCase): Promise<Countermeasure[]> 
   }));
 }
 
-export const configuredModel = model || "built-in-rule-engine";
+export const configuredModel = defaultModel || "built-in-rule-engine";

@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import { Topbar } from "@/components/Topbar";
 import { CaseWorkspace } from "@/components/CaseWorkspace";
 import { getCase } from "@/lib/db";
+import { getModelOptions } from "@/lib/ai";
 
 export const dynamic = "force-dynamic";
 
@@ -9,5 +10,5 @@ export default async function CasePage({ params }: { params: Promise<{ id: strin
   const { id } = await params;
   const item = getCase(id);
   if (!item) notFound();
-  return <div className="app-shell"><Topbar/><CaseWorkspace initialCase={item}/></div>;
+  return <div className="app-shell"><Topbar/><CaseWorkspace initialCase={item} modelOptions={getModelOptions()}/></div>;
 }
