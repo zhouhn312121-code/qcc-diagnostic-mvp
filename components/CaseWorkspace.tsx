@@ -1,11 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, BookOpenCheck, CheckCircle2, Clipboard, Download, FileSearch, GitBranch, Lightbulb, Plus, Printer, Save, ShieldAlert, Sparkles, Trash2 } from "lucide-react";
-import { caseProgress, emptyStep, readinessIssues } from "@/lib/case-utils";
-import { problemTypes, type CauseHypothesis, type Countermeasure, type ProcessFinding, type QccCase } from "@/lib/types";
+import { ArrowLeft, BookOpenCheck, CheckCircle2, Clipboard, Download, FileSearch, GitBranch, Lightbulb, Plus, Printer, Save, ShieldAlert, Sparkles, Trash2, X, ZoomIn, ZoomOut } from "lucide-react";
+import { caseProgress, emptyStep, hasProcessLoop, processIssues, readinessIssues, syncAutoTransitions } from "@/lib/case-utils";
+import { makeId } from "@/lib/ids";
+import { problemTypes, type CauseHypothesis, type Countermeasure, type ProcessFinding, type ProcessStep, type ProcessTransition, type QccCase } from "@/lib/types";
 
 const stages = [
   { id: 1, label: "问题与流程", icon: GitBranch },
@@ -37,29 +38,81 @@ export function CaseWorkspace({ initialCase }: { initialCase: QccCase }) {
   const [activeStage, setActiveStage] = useState(Math.min(initialCase.stage, 5));
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<"saved" | "dirty" | "saving" | "retrying" | "failed">("saved");
+  const [draft, setDraft] = useState<QccCase | null>(null);
   const [running, setRunning] = useState<"diagnose" | "solutions" | null>(null);
   const [toast, setToast] = useState("");
   const router = useRouter();
+  const itemRef = useRef(item);
+  const revisionRef = useRef(0);
+  const saveQueueRef = useRef<Promise<QccCase | null>>(Promise.resolve(null));
   const issues = useMemo(() => readinessIssues(item), [item]);
   const progress = useMemo(() => caseProgress(item), [item]);
 
   function notify(message: string) {
     setToast(message); window.setTimeout(() => setToast(""), 2800);
   }
-  function update(next: QccCase) { setItem(next); setDirty(true); }
+  useEffect(() => { itemRef.current = item; }, [item]);
+  useEffect(() => {
+    const key = `qcc-draft:${initialCase.id}`;
+    const stored = window.localStorage.getItem(key);
+    if (!stored) return;
+    try {
+      const parsed = JSON.parse(stored) as QccCase;
+      if (new Date(parsed.updatedAt).getTime() >= new Date(initialCase.updatedAt).getTime()) setDraft(parsed);
+    } catch { window.localStorage.removeItem(key); }
+  }, [initialCase.id, initialCase.updatedAt]);
+  useEffect(() => {
+    const warn = (event: BeforeUnloadEvent) => { if (dirty) event.preventDefault(); };
+    window.addEventListener("beforeunload", warn); return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
+  function update(next: QccCase) {
+    revisionRef.current += 1; itemRef.current = next; setItem(next); setDirty(true); setSaveStatus("dirty");
+    window.localStorage.setItem(`qcc-draft:${next.id}`, JSON.stringify({ ...next, updatedAt: new Date().toISOString() }));
+  }
   function updateField<K extends keyof QccCase>(key: K, value: QccCase[K]) { update({ ...item, [key]: value }); }
 
-  async function save(silent = false) {
-    setSaving(true);
-    try {
-      const response = await fetch(`/api/cases/${item.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(item) });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "保存失败");
-      setItem(data.case); setDirty(false); if (!silent) notify("课题已保存");
-      return data.case as QccCase;
-    } catch (error) { notify(error instanceof Error ? error.message : "保存失败"); return null; }
-    finally { setSaving(false); }
-  }
+  const performSave = useCallback(async (snapshot: QccCase, revision: number, silent: boolean) => {
+    setSaving(true); setSaveStatus("saving");
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const controller = new AbortController(); const timeout = window.setTimeout(() => controller.abort(), 15000);
+      try {
+        const payload = { ...snapshot, version: itemRef.current.version };
+        const response = await fetch(`/api/cases/${snapshot.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal: controller.signal });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const error = new Error(data.error || "保存失败") as Error & { retryable?: boolean };
+          error.retryable = response.status >= 500; throw error;
+        }
+        const saved = data.case as QccCase;
+        if (revisionRef.current === revision) {
+          itemRef.current = saved; setItem(saved); setDirty(false); setSaveStatus("saved");
+          window.localStorage.removeItem(`qcc-draft:${snapshot.id}`);
+        } else {
+          setItem((current) => { const next = { ...current, version: saved.version, updatedAt: saved.updatedAt }; itemRef.current = next; return next; });
+          setSaveStatus("dirty");
+        }
+        if (!silent) notify("课题已保存");
+        return saved;
+      } catch (error) {
+        const retryable = error instanceof DOMException && error.name === "AbortError" || Boolean((error as Error & { retryable?: boolean }).retryable) || error instanceof TypeError;
+        if (!retryable || attempt === 2) { setSaveStatus("failed"); notify(error instanceof Error ? error.message : "保存失败"); return null; }
+        setSaveStatus("retrying"); await new Promise((resolve) => window.setTimeout(resolve, 500 * (attempt + 1)));
+      } finally { window.clearTimeout(timeout); }
+    }
+    return null;
+  }, []);
+  const save = useCallback((silent = false) => {
+    const snapshot = itemRef.current; const revision = revisionRef.current;
+    const queued = saveQueueRef.current.then(() => performSave(snapshot, revision, silent));
+    saveQueueRef.current = queued.finally(() => { setSaving(false); });
+    return queued;
+  }, [performSave]);
+  useEffect(() => {
+    if (!dirty) return;
+    const timer = window.setTimeout(() => { void save(true); }, 2000);
+    return () => window.clearTimeout(timer);
+  }, [dirty, item, save]);
 
   async function runDiagnosis() {
     if (issues.length) { notify(`还有${issues.length}项信息需要补充`); return; }
@@ -88,7 +141,7 @@ export function CaseWorkspace({ initialCase }: { initialCase: QccCase }) {
     finally { setRunning(null); }
   }
 
-  function updateStep(index: number, key: keyof QccCase["steps"][number], value: string) {
+  function updateStep(index: number, key: keyof QccCase["steps"][number], value: ProcessStep[keyof ProcessStep]) {
     const steps = [...item.steps]; steps[index] = { ...steps[index], [key]: value }; update({ ...item, steps });
   }
   function updateFinding(index: number, patch: Partial<ProcessFinding>) {
@@ -136,7 +189,8 @@ export function CaseWorkspace({ initialCase }: { initialCase: QccCase }) {
           <div className="workspace-title"><span className={`badge ${badgeClass(item.status)}`}>{item.status}</span><h1>{item.title}</h1></div>
           <div className="head-actions">
             <span className="badge gray">完成度 {progress}%</span>
-            <button className="btn ghost" onClick={() => save()} disabled={saving || !dirty}>{saving ? <span className="spinner"/> : <Save size={16}/>}<span className="label">{dirty ? "保存" : "已保存"}</span></button>
+            <span className={`save-state ${saveStatus}`}>{saveStatus === "dirty" ? "有未保存修改" : saveStatus === "saving" ? "保存中" : saveStatus === "retrying" ? "保存失败，正在重试" : saveStatus === "failed" ? "保存失败" : "已保存"}</span>
+            <button className="btn ghost" onClick={() => void save()} disabled={saving || !dirty}>{saving ? <span className="spinner"/> : <Save size={16}/>}<span className="label">保存</span></button>
           </div>
         </header>
         <div className="content">
@@ -148,11 +202,41 @@ export function CaseWorkspace({ initialCase }: { initialCase: QccCase }) {
         </div>
       </main>
       {toast && <div className="toast">{toast}</div>}
+      {draft && <div className="draft-banner"><div><strong>发现未保存的本地草稿</strong><span>可恢复上次异常退出前的内容。</span></div><div><button className="btn ghost" onClick={() => { window.localStorage.removeItem(`qcc-draft:${item.id}`); setDraft(null); }}>忽略</button><button className="btn primary" onClick={() => { update({ ...draft, version: itemRef.current.version }); setDraft(null); }}>恢复草稿</button></div></div>}
     </div>
   );
 }
 
-function ProblemStage({ item, updateField, update, updateStep, runDiagnosis, issues, running }: { item: QccCase; updateField: <K extends keyof QccCase>(key: K, value: QccCase[K]) => void; update: (item: QccCase) => void; updateStep: (index: number, key: keyof QccCase["steps"][number], value: string) => void; runDiagnosis: () => void; issues: string[]; running: string | null }) {
+function ProblemStage({ item, updateField, update, updateStep, runDiagnosis, issues, running }: { item: QccCase; updateField: <K extends keyof QccCase>(key: K, value: QccCase[K]) => void; update: (item: QccCase) => void; updateStep: (index: number, key: keyof QccCase["steps"][number], value: ProcessStep[keyof ProcessStep]) => void; runDiagnosis: () => void; issues: string[]; running: string | null }) {
+  const [flowTab, setFlowTab] = useState<"table" | "diagram">("table");
+  const [editingStepId, setEditingStepId] = useState<string | null>(null);
+  function commit(next: QccCase) { update(syncAutoTransitions({ ...next, steps: next.steps.map((step, index) => ({ ...step, order: index + 1 })) })); }
+  function changeNodeType(index: number, nodeType: ProcessStep["nodeType"]) {
+    const steps = [...item.steps]; const step = steps[index];
+    steps[index] = { ...step, nodeType, routingMode: nodeType === "ACTION" ? "AUTO_NEXT" : "SPECIFIED" };
+    let transitions = item.transitions.filter((transition) => transition.sourceNodeId !== step.id);
+    if (nodeType === "DECISION") {
+      const target = steps[index + 1]?.id || steps.find((candidate) => candidate.nodeType === "END")?.id;
+      if (target) transitions = [
+        ...transitions,
+        { id: makeId("transition"), sourceNodeId: step.id, targetNodeId: target, transitionType: "CONDITION", branchName: "是", conditionExpression: "", isDefault: false, order: 1 },
+        { id: makeId("transition"), sourceNodeId: step.id, targetNodeId: target, transitionType: "CONDITION", branchName: "否", conditionExpression: "", isDefault: true, order: 2 },
+      ];
+      setEditingStepId(step.id);
+    }
+    commit({ ...item, steps, transitions });
+  }
+  function addStep() {
+    if (item.steps.length >= 20) return;
+    const endIndex = item.steps.findIndex((step) => step.nodeType === "END");
+    const insertAt = endIndex < 0 ? item.steps.length : endIndex;
+    const steps = [...item.steps]; steps.splice(insertAt, 0, emptyStep(insertAt + 1)); commit({ ...item, steps });
+  }
+  function deleteStep(step: ProcessStep) {
+    const incoming = item.transitions.filter((transition) => transition.targetNodeId === step.id);
+    if (incoming.length) { window.alert(`该步骤正被${incoming.length}条流转引用，请先修改相关流转。`); return; }
+    commit({ ...item, steps: item.steps.filter((candidate) => candidate.id !== step.id), transitions: item.transitions.filter((transition) => transition.sourceNodeId !== step.id) });
+  }
   return <>
     <div className="step-intro"><div><h2>定义问题与流程</h2><p>先把问题讲清楚，再让系统检查流程。缺少量化事实时，诊断不会启动。</p></div></div>
     <section className="panel">
@@ -180,15 +264,83 @@ function ProblemStage({ item, updateField, update, updateStep, runDiagnosis, iss
       </div>
     </section>
     <section className="panel">
-      <div className="panel-title"><div><h3>AS IS关键流程步骤</h3><p>填写实际怎么做，而不是制度文件规定应该怎么做。首版支持5–7个步骤。</p></div><button className="btn ghost" disabled={item.steps.length >= 7} onClick={() => update({ ...item, steps: [...item.steps, emptyStep(item.steps.length + 1)] })}><Plus size={15}/>增加步骤</button></div>
-      <div style={{ overflowX: "auto" }}><table className="step-table"><thead><tr><th className="narrow">#</th><th>步骤</th><th>主责</th><th>输入</th><th>实际活动</th><th>输出</th><th>标准/时限</th><th>异常事实</th><th></th></tr></thead><tbody>
-        {item.steps.map((step, index) => <tr key={step.id}><td className="narrow">{index + 1}</td>{(["name","owner","input","activity","output","standard","anomaly"] as const).map((key) => <td key={key}><input value={step[key]} onChange={(e) => updateStep(index, key, e.target.value)} placeholder={key === "activity" ? "实际怎么做" : ""}/></td>)}<td><button className="icon-btn" disabled={item.steps.length <= 5} onClick={() => update({ ...item, steps: item.steps.filter((_, i) => i !== index).map((s, i) => ({ ...s, order: i + 1 })) })}><Trash2 size={14}/></button></td></tr>)}
-      </tbody></table></div>
+      <div className="panel-title"><div><h3>AS IS关键流程步骤</h3><p>填写实际做法；判断节点可配置条件分支和回流。最多20个节点。</p></div><button className="btn ghost" disabled={item.steps.length >= 20} onClick={addStep}><Plus size={15}/>增加步骤</button></div>
+      <div className="flow-tabs"><button className={flowTab === "table" ? "active" : ""} onClick={() => setFlowTab("table")}>步骤信息录入</button><button className={flowTab === "diagram" ? "active" : ""} onClick={() => setFlowTab("diagram")}>流程图预览</button></div>
+      {flowTab === "table" ? <div style={{ overflowX: "auto" }}><table className="step-table"><thead><tr><th className="narrow">#</th><th>步骤</th><th>节点类型</th><th>主责</th><th>输入</th><th>实际活动</th><th>输出</th><th>标准/时限</th><th>异常事实</th><th>流转关系</th><th></th></tr></thead><tbody>
+        {item.steps.map((step, index) => <tr key={step.id} className={step.nodeType === "END" ? "end-row" : ""}><td className="narrow"><div className="order-tools"><span>{index + 1}</span><button disabled={index === 0} onClick={() => { const steps = [...item.steps]; [steps[index - 1], steps[index]] = [steps[index], steps[index - 1]]; commit({ ...item, steps }); }}>↑</button><button disabled={index === item.steps.length - 1} onClick={() => { const steps = [...item.steps]; [steps[index + 1], steps[index]] = [steps[index], steps[index + 1]]; commit({ ...item, steps }); }}>↓</button></div></td>
+          <td><input value={step.name} onChange={(e) => updateStep(index, "name", e.target.value)} /></td>
+          <td><select value={step.nodeType} onChange={(e) => changeNodeType(index, e.target.value as ProcessStep["nodeType"])}><option value="ACTION">普通步骤</option><option value="DECISION">判断节点</option><option value="END">结束节点</option></select></td>
+          {(["owner","input","activity","output","standard","anomaly"] as const).map((key) => <td key={key}><input disabled={step.nodeType === "END" && !["output","anomaly"].includes(key)} value={step[key]} onChange={(e) => updateStep(index, key, e.target.value)} placeholder={key === "activity" ? "实际怎么做" : ""}/></td>)}
+          <td><button className="route-summary" disabled={step.nodeType === "END"} onClick={() => setEditingStepId(step.id)}>{transitionSummary(item, step)}</button></td>
+          <td><button aria-label="删除步骤" className="icon-btn" disabled={item.steps.length <= 2} onClick={() => deleteStep(step)}><Trash2 size={14}/></button></td></tr>)}
+      </tbody></table></div> : <FlowDiagram item={item} />}
+      {processIssues(item).length > 0 && <div className="flow-warnings">{processIssues(item).map((issue) => <span key={issue}>⚠ {issue}</span>)}</div>}
+      {hasProcessLoop(item) && <div className="flow-warnings"><span>↩ 检测到流程回流，请确认该循环符合实际业务。</span></div>}
     </section>
+    {editingStepId && <TransitionDrawer item={item} stepId={editingStepId} update={commit} close={() => setEditingStepId(null)} />}
     <div className={`callout ${issues.length ? "warn" : "success"}`}><ShieldAlert size={19}/><div><strong>{issues.length ? `诊断前还需补充${issues.length}项` : "信息完整，可以开始诊断"}</strong>{issues.length > 0 && <ul className="issues">{issues.map((x) => <li key={x}>{x}</li>)}</ul>}</div></div>
     <label className="callout info" style={{ cursor: "pointer" }}><input type="checkbox" checked={item.sanitizedConfirmed} onChange={(e) => updateField("sanitizedConfirmed", e.target.checked)} /><div><strong>我确认资料已经脱敏</strong><br/>不包含客户名称、人员姓名、合同编号或其他敏感数据。</div></label>
     <button className="btn blue" disabled={issues.length > 0 || running === "diagnose"} onClick={runDiagnosis}>{running === "diagnose" ? <span className="spinner"/> : <Sparkles size={17}/>}开始流程断点诊断</button>
   </>;
+}
+
+function transitionSummary(item: QccCase, step: ProcessStep) {
+  const outgoing = item.transitions.filter((transition) => transition.sourceNodeId === step.id).sort((a, b) => a.order - b.order);
+  if (!outgoing.length) return "未配置";
+  if (step.nodeType === "DECISION") return outgoing.length <= 2 ? outgoing.map((transition) => `${transition.branchName || "分支"}→${item.steps.find((target) => target.id === transition.targetNodeId)?.name || "?"}`).join("；") : `已配置${outgoing.length}个分支`;
+  const target = item.steps.find((candidate) => candidate.id === outgoing[0].targetNodeId);
+  return `${step.routingMode === "AUTO_NEXT" ? "自动" : "指定"}→${target?.name || "未配置"}`;
+}
+
+function TransitionDrawer({ item, stepId, update, close }: { item: QccCase; stepId: string; update: (item: QccCase) => void; close: () => void }) {
+  useEffect(() => { const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") close(); }; window.addEventListener("keydown", onKey); return () => window.removeEventListener("keydown", onKey); }, [close]);
+  const step = item.steps.find((candidate) => candidate.id === stepId);
+  if (!step) return null;
+  const outgoing = item.transitions.filter((transition) => transition.sourceNodeId === stepId).sort((a, b) => a.order - b.order);
+  const targets = item.steps.filter((candidate) => candidate.id !== stepId);
+  function replaceOutgoing(nextOutgoing: ProcessTransition[], stepPatch?: Partial<ProcessStep>) {
+    update({ ...item, steps: item.steps.map((candidate) => candidate.id === stepId ? { ...candidate, ...stepPatch } : candidate), transitions: [...item.transitions.filter((transition) => transition.sourceNodeId !== stepId), ...nextOutgoing] });
+  }
+  function updateBranch(id: string, patch: Partial<ProcessTransition>) {
+    replaceOutgoing(outgoing.map((transition) => transition.id === id ? { ...transition, ...patch } : patch.isDefault ? { ...transition, isDefault: false } : transition));
+  }
+  return <div className="drawer-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}>
+    <aside className="transition-drawer" role="dialog" aria-modal="true" aria-label="配置流转关系">
+      <div className="drawer-head"><div><h3>配置流转关系</h3><p>{step.name || `步骤${step.order}`}</p></div><button className="icon-btn" onClick={close}><X size={18}/></button></div>
+      {step.nodeType === "ACTION" ? <div className="drawer-body">
+        <label className="field"><span>流转方式</span><select value={step.routingMode} onChange={(event) => {
+          const mode = event.target.value as ProcessStep["routingMode"];
+          const index = item.steps.findIndex((candidate) => candidate.id === step.id);
+          const target = mode === "AUTO_NEXT" ? item.steps[index + 1] : targets[0];
+          replaceOutgoing(target ? [{ id: outgoing[0]?.id || makeId("transition"), sourceNodeId: step.id, targetNodeId: target.id, transitionType: "DEFAULT", branchName: "", conditionExpression: "", isDefault: true, order: 1 }] : [], { routingMode: mode });
+        }}><option value="AUTO_NEXT">自动进入下一步骤</option><option value="SPECIFIED">跳转到指定步骤</option></select></label>
+        {step.routingMode === "SPECIFIED" && <label className="field"><span>目标步骤</span><select value={outgoing[0]?.targetNodeId || ""} onChange={(event) => replaceOutgoing([{ id: outgoing[0]?.id || makeId("transition"), sourceNodeId: step.id, targetNodeId: event.target.value, transitionType: "DEFAULT", branchName: "", conditionExpression: "", isDefault: true, order: 1 }])}><option value="">请选择</option>{targets.map((target) => <option key={target.id} value={target.id}>{target.order}. {target.name || "未命名步骤"}</option>)}</select></label>}
+      </div> : <div className="drawer-body">
+        <label className="field"><span>判断名称</span><input value={step.decisionTitle} placeholder="例如：是否满足库存要求？" onChange={(event) => replaceOutgoing(outgoing, { decisionTitle: event.target.value })}/></label>
+        <label className="field"><span>判断依据</span><textarea value={step.decisionBasis} placeholder="说明实际判断口径" onChange={(event) => replaceOutgoing(outgoing, { decisionBasis: event.target.value })}/></label>
+        <div className="branch-list">{outgoing.map((transition, index) => <div className="branch-card" key={transition.id}>
+          <div className="branch-title"><strong>分支 {index + 1}</strong><button className="icon-btn" disabled={outgoing.length <= 2} onClick={() => replaceOutgoing(outgoing.filter((candidate) => candidate.id !== transition.id).map((candidate, order) => ({ ...candidate, order: order + 1 })))}><Trash2 size={14}/></button></div>
+          <label className="field"><span>分支名称</span><input value={transition.branchName} onChange={(event) => updateBranch(transition.id, { branchName: event.target.value })}/></label>
+          <label className="field"><span>判断条件</span><input value={transition.conditionExpression} onChange={(event) => updateBranch(transition.id, { conditionExpression: event.target.value })}/></label>
+          <label className="field"><span>流转至</span><select value={transition.targetNodeId} onChange={(event) => updateBranch(transition.id, { targetNodeId: event.target.value })}>{targets.map((target) => <option key={target.id} value={target.id}>{target.order}. {target.name || "未命名步骤"}</option>)}</select></label>
+          <label className="default-branch"><input type="radio" name={`default-${step.id}`} checked={transition.isDefault} onChange={() => updateBranch(transition.id, { isDefault: true })}/>设为默认分支</label>
+        </div>)}</div>
+        <button className="btn ghost" disabled={outgoing.length >= 6 || !targets.length} onClick={() => replaceOutgoing([...outgoing, { id: makeId("transition"), sourceNodeId: step.id, targetNodeId: targets[0].id, transitionType: "CONDITION", branchName: `分支${outgoing.length + 1}`, conditionExpression: "", isDefault: false, order: outgoing.length + 1 }])}><Plus size={15}/>添加分支</button>
+      </div>}
+      <div className="drawer-actions"><button className="btn primary" onClick={close}>完成</button></div>
+    </aside>
+  </div>;
+}
+
+function FlowDiagram({ item }: { item: QccCase }) {
+  const [zoom, setZoom] = useState(1);
+  const width = Math.max(900, item.steps.length * 220 + 120); const height = 380;
+  const points = new Map(item.steps.map((step, index) => [step.id, { x: 70 + index * 220, y: 155 }]));
+  return <div className="diagram-shell"><div className="diagram-tools"><button onClick={() => setZoom((value) => Math.min(1.5, value + .1))}><ZoomIn size={16}/></button><button onClick={() => setZoom((value) => Math.max(.6, value - .1))}><ZoomOut size={16}/></button><button onClick={() => setZoom(1)}>适应画布</button></div><div className="diagram-scroll"><svg width={width * zoom} height={height * zoom} viewBox={`0 0 ${width} ${height}`}>
+    <defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#55708f"/></marker></defs>
+    {item.transitions.map((transition) => { const source = points.get(transition.sourceNodeId); const target = points.get(transition.targetNodeId); if (!source || !target) return null; const back = target.x <= source.x; const path = back ? `M ${source.x + 150} ${source.y + 35} C ${source.x + 180} 70, ${target.x - 30} 70, ${target.x} ${target.y + 35}` : `M ${source.x + 150} ${source.y + 35} L ${target.x} ${target.y + 35}`; return <g key={transition.id}><path d={path} fill="none" stroke="#55708f" strokeWidth="2" markerEnd="url(#arrow)"/><text x={(source.x + target.x + 150) / 2} y={back ? 62 : source.y + 25} textAnchor="middle" className="edge-label">{transition.branchName}</text></g>; })}
+    {item.steps.map((step) => { const point = points.get(step.id)!; const label = step.nodeType === "DECISION" ? step.decisionTitle || step.name : step.name; return <g key={step.id}>{step.nodeType === "DECISION" ? <polygon points={`${point.x + 75},${point.y} ${point.x + 150},${point.y + 35} ${point.x + 75},${point.y + 70} ${point.x},${point.y + 35}`} className="node decision"/> : <rect x={point.x} y={point.y} width="150" height="70" rx={step.nodeType === "END" ? 32 : 10} className={`node ${step.nodeType.toLowerCase()}`}/>}<text x={point.x + 75} y={point.y + 31} textAnchor="middle" className="node-label"><tspan x={point.x + 75}>{label.slice(0, 12) || "未命名步骤"}</tspan>{label.length > 12 && <tspan x={point.x + 75} dy="18">{label.slice(12, 24)}</tspan>}</text></g>; })}
+  </svg></div></div>;
 }
 
 function DiagnosisStage({ item, issues, runDiagnosis, running, updateFinding, goNext }: { item: QccCase; issues: string[]; runDiagnosis: () => void; running: string | null; updateFinding: (index: number, patch: Partial<ProcessFinding>) => void; goNext: () => void }) {

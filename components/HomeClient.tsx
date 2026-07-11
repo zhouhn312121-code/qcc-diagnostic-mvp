@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowRight, CirclePlus, GitBranch, SearchCheck, ShieldCheck, Sparkles } from "lucide-react";
+import { ArrowRight, CirclePlus, GitBranch, SearchCheck, ShieldCheck, Sparkles, Trash2 } from "lucide-react";
 import type { CaseSummary } from "@/lib/types";
 
 function typeClass(type: string) {
@@ -13,6 +13,10 @@ export function HomeClient() {
   const [cases, setCases] = useState<CaseSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  const [deleting, setDeleting] = useState<CaseSummary | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+  const [toast, setToast] = useState("");
   const router = useRouter();
 
   useEffect(() => { fetch("/api/cases").then((r) => r.json()).then((data) => setCases(data.cases)).finally(() => setLoading(false)); }, []);
@@ -21,6 +25,23 @@ export function HomeClient() {
     const response = await fetch("/api/cases", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     const data = await response.json();
     router.push(`/cases/${data.case.id}`);
+  }
+  useEffect(() => {
+    if (!deleting) return;
+    const close = (event: KeyboardEvent) => { if (event.key === "Escape" && !deleteBusy) setDeleting(null); };
+    window.addEventListener("keydown", close); return () => window.removeEventListener("keydown", close);
+  }, [deleting, deleteBusy]);
+  async function deleteCase() {
+    if (!deleting || deleteBusy) return;
+    setDeleteBusy(true); setDeleteError("");
+    try {
+      const response = await fetch(`/api/cases/${deleting.id}`, { method: "DELETE" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "删除失败，请稍后重试");
+      setCases((current) => current.filter((item) => item.id !== deleting.id)); setDeleting(null); setToast("课题已删除");
+      window.setTimeout(() => setToast(""), 2800);
+    } catch (error) { setDeleteError(error instanceof Error ? error.message : "删除失败，请稍后重试"); }
+    finally { setDeleteBusy(false); }
   }
 
   return (
@@ -53,16 +74,18 @@ export function HomeClient() {
         {loading ? <div className="loading">正在准备课题…</div> : (
           <div className="case-grid">
             {cases.map((item) => (
-              <button key={item.id} className="case-card" onClick={() => router.push(`/cases/${item.id}`)} style={{ textAlign: "left" }}>
-                <div className="case-card-top"><h3>{item.title}</h3><span className={`badge ${typeClass(item.problemType)}`}>{item.problemType}</span></div>
+              <article key={item.id} className="case-card">
+                <div className="case-card-top"><h3>{item.title}</h3><div className="case-card-actions"><span className={`badge ${typeClass(item.problemType)}`}>{item.problemType}</span><button title="删除课题" aria-label={`删除课题：${item.title}`} className="delete-case" onClick={() => { setDeleteError(""); setDeleting(item); }}><Trash2 size={15}/></button></div></div>
                 <span className="badge gray">{item.status}</span>
                 <div className="metrics"><span><b>{item.findings}</b>断点</span><span><b>{item.supportedCauses}</b>已验证原因</span></div>
-                <div className="case-card-bottom"><span>{new Date(item.updatedAt).toLocaleDateString("zh-CN")}</span><span>进入诊断 <ArrowRight size={14}/></span></div>
-              </button>
+                <div className="case-card-bottom"><span>{new Date(item.updatedAt).toLocaleDateString("zh-CN")}</span><button className="enter-case" onClick={() => router.push(`/cases/${item.id}`)}>进入诊断 <ArrowRight size={14}/></button></div>
+              </article>
             ))}
           </div>
         )}
       </section>
+      {deleting && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !deleteBusy) setDeleting(null); }}><div className="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-title"><div className="danger-icon"><Trash2 size={22}/></div><h3 id="delete-title">确认删除课题？</h3><p className="delete-name">{deleting.title}</p><p>删除后，该课题的流程、诊断结果、原因验证和改善方案将无法恢复。</p>{deleteError && <div className="modal-error">{deleteError}</div>}<div className="modal-actions"><button autoFocus className="btn ghost" disabled={deleteBusy} onClick={() => setDeleting(null)}>取消</button><button className="btn danger" disabled={deleteBusy} onClick={deleteCase}>{deleteBusy ? <span className="spinner"/> : <Trash2 size={15}/>}确认删除</button></div></div></div>}
+      {toast && <div className="toast">{toast}</div>}
     </main>
   );
 }

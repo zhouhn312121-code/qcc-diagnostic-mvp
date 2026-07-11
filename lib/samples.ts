@@ -1,4 +1,5 @@
 import type { ProblemType, QccCase } from "./types";
+import { normalizeCase, syncAutoTransitions } from "./case-utils";
 
 const now = "2026-06-29T00:00:00.000Z";
 
@@ -67,12 +68,13 @@ const specs: SampleSpec[] = [
 ];
 
 export function sampleCases(): QccCase[] {
-  return specs.map((spec) => ({
+  return specs.map((spec) => syncAutoTransitions(normalizeCase({
     id: spec.id, title: spec.title, problemType: spec.problemType, object: spec.object, location: spec.location,
     period: "2026年4–6月", frequency: spec.frequency, impact: spec.impact, metric: spec.metric, baseline: spec.baseline,
     target: spec.target, dataDefinition: spec.dataDefinition, processStart: spec.processStart, processEnd: spec.processEnd,
     processOwner: spec.processOwner, sanitizedConfirmed: true,
-    steps: spec.steps.map(([name, owner, input, activity, output, standard, anomaly], index) => ({ id: `${spec.id}_step_${index + 1}`, order: index + 1, name, owner, input, activity, output, standard, anomaly })),
+    steps: spec.steps.map(([name, owner, input, activity, output, standard, anomaly], index) => ({ id: `${spec.id}_step_${index + 1}`, order: index + 1, name, owner, input, activity, output, standard, anomaly, nodeType: "ACTION" as const, routingMode: "AUTO_NEXT" as const, decisionTitle: "", decisionBasis: "" })),
+    transitions: [], version: 1,
     findings: [], hypotheses: [], countermeasures: [], stage: 1, status: "待诊断", createdAt: now, updatedAt: now,
-  }));
+  })));
 }
