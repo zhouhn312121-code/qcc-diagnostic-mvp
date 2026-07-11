@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ArrowRight, CirclePlus, GitBranch, SearchCheck, ShieldCheck, Sparkles, Trash2 } from "lucide-react";
 import type { CaseSummary } from "@/lib/types";
@@ -17,6 +18,7 @@ export function HomeClient() {
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState("");
   const [toast, setToast] = useState("");
+  const [openingId, setOpeningId] = useState<string | null>(null);
   const router = useRouter();
 
   useEffect(() => { fetch("/api/cases").then((r) => r.json()).then((data) => setCases(data.cases)).finally(() => setLoading(false)); }, []);
@@ -74,11 +76,14 @@ export function HomeClient() {
         {loading ? <div className="loading">正在准备课题…</div> : (
           <div className="case-grid">
             {cases.map((item) => (
-              <article key={item.id} className="case-card">
-                <div className="case-card-top"><h3>{item.title}</h3><div className="case-card-actions"><span className={`badge ${typeClass(item.problemType)}`}>{item.problemType}</span><button title="删除课题" aria-label={`删除课题：${item.title}`} className="delete-case" onClick={() => { setDeleteError(""); setDeleting(item); }}><Trash2 size={15}/></button></div></div>
-                <span className="badge gray">{item.status}</span>
-                <div className="metrics"><span><b>{item.findings}</b>断点</span><span><b>{item.supportedCauses}</b>已验证原因</span></div>
-                <div className="case-card-bottom"><span>{new Date(item.updatedAt).toLocaleDateString("zh-CN")}</span><button className="enter-case" onClick={() => router.push(`/cases/${item.id}`)}>进入诊断 <ArrowRight size={14}/></button></div>
+              <article key={item.id} className={`case-card ${openingId === item.id ? "opening" : ""}`}>
+                <Link className="case-card-link" href={`/cases/${item.id}`} prefetch onClick={() => setOpeningId(item.id)} aria-label={`进入课题：${item.title}`}>
+                  <div className="case-card-top"><h3>{item.title}</h3><span className={`badge ${typeClass(item.problemType)}`}>{item.problemType}</span></div>
+                  <span className="badge gray">{item.status}</span>
+                  <div className="metrics"><span><b>{item.findings}</b>断点</span><span><b>{item.supportedCauses}</b>已验证原因</span></div>
+                  <div className="case-card-bottom"><span>{new Date(item.updatedAt).toLocaleDateString("zh-CN")}</span><span className="enter-case">{openingId === item.id ? "正在打开…" : "进入诊断"} <ArrowRight size={14}/></span></div>
+                </Link>
+                <button title="删除课题" aria-label={`删除课题：${item.title}`} className="delete-case" onClick={() => { setDeleteError(""); setDeleting(item); }}><Trash2 size={15}/></button>
               </article>
             ))}
           </div>

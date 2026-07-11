@@ -8,6 +8,7 @@ const databasePath = process.env.DATABASE_PATH || path.join(process.cwd(), "data
 fs.mkdirSync(path.dirname(databasePath), { recursive: true });
 
 const db = new DatabaseSync(databasePath);
+db.exec("PRAGMA busy_timeout = 5000;");
 db.exec(`
   PRAGMA journal_mode = WAL;
   CREATE TABLE IF NOT EXISTS cases (
