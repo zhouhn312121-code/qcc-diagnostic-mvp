@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { aiConfigured, configuredModel, diagnoseWithAi } from "@/lib/ai";
+import { aiConfigured, diagnoseWithAi, resolveModel } from "@/lib/ai";
 import { getCase, recordAiRun, saveCase } from "@/lib/db";
 import { readinessIssues } from "@/lib/case-utils";
 import { diagnoseWithRules, mergePreservingEdits } from "@/lib/rules";
@@ -13,8 +13,9 @@ export async function POST(request: Request) {
 
   let result;
   let engine: "AI模型" | "规则引擎" | "AI失败后规则引擎" = "规则引擎";
+  const selectedModel = resolveModel(item.diagnosisModel);
   try {
-    if (aiConfigured()) { result = await diagnoseWithAi(item); engine = "AI模型"; }
+    if (selectedModel !== "rules" && aiConfigured(selectedModel)) { result = await diagnoseWithAi(item, selectedModel); engine = "AI模型"; }
     else result = diagnoseWithRules(item);
   } catch {
     result = diagnoseWithRules(item); engine = "AI失败后规则引擎";
@@ -25,6 +26,6 @@ export async function POST(request: Request) {
     hypotheses: mergePreservingEdits(item.hypotheses, result.hypotheses),
     stage: 3, status: "验证中", engine,
   });
-  recordAiRun({ caseId, action: "diagnose", engine, model: configuredModel, inputSummary: `${item.title}｜${item.steps.length}个流程步骤`, outputJson: JSON.stringify(result), createdAt: new Date().toISOString() });
-  return NextResponse.json({ case: next, engine });
+  recordAiRun({ caseId, action: "diagnose", engine, model: selectedModel === "rules" ? "built-in-rule-engine" : selectedModel, inputSummary: `${item.title}｜${item.steps.length}个流程步骤`, outputJson: JSON.stringify(result), createdAt: new Date().toISOString() });
+  return NextResponse.json({ case: next, engine, model: selectedModel });
 }

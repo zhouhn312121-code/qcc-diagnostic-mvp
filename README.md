@@ -23,7 +23,8 @@ cp .env.example .env.local
 
 - `AI_BASE_URL`：兼容 `/chat/completions` 的接口根地址；
 - `AI_API_KEY`：接口密钥；
-- `AI_MODEL`：模型名称。
+- `AI_MODEL`：默认模型名称；
+- `AI_MODELS`：诊断界面可选模型，使用英文逗号分隔；留空时只显示默认模型。
 
 模型必须返回JSON。模型超时、格式不合规或调用失败时，系统自动回退到规则引擎，并记录实际使用的诊断引擎。
 

@@ -112,6 +112,7 @@ export interface QccCase {
   stage: 1 | 2 | 3 | 4 | 5;
   status: "草稿" | "待诊断" | "验证中" | "方案设计" | "已完成";
   engine?: "规则引擎" | "AI模型" | "AI失败后规则引擎";
+  diagnosisModel?: string;
   createdAt: string;
   updatedAt: string;
   version: number;
