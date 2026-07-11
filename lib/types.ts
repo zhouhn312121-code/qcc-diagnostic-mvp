@@ -5,6 +5,9 @@ export const findingCategories = ["责任", "交接", "规则", "控制", "数�
 export type FindingCategory = (typeof findingCategories)[number];
 export type EvidenceStatus = "待验证" | "证据支持" | "证据不支持" | "证据不足";
 export type Priority = "高" | "中" | "低";
+export type ProcessNodeType = "ACTION" | "DECISION" | "END";
+export type ProcessRoutingMode = "AUTO_NEXT" | "SPECIFIED";
+export type ProcessTransitionType = "DEFAULT" | "CONDITION";
 
 export interface ProcessStep {
   id: string;
@@ -16,6 +19,21 @@ export interface ProcessStep {
   output: string;
   standard: string;
   anomaly: string;
+  nodeType: ProcessNodeType;
+  routingMode: ProcessRoutingMode;
+  decisionTitle: string;
+  decisionBasis: string;
+}
+
+export interface ProcessTransition {
+  id: string;
+  sourceNodeId: string;
+  targetNodeId: string;
+  transitionType: ProcessTransitionType;
+  branchName: string;
+  conditionExpression: string;
+  isDefault: boolean;
+  order: number;
 }
 
 export interface ProcessFinding {
@@ -87,6 +105,7 @@ export interface QccCase {
   processOwner: string;
   sanitizedConfirmed: boolean;
   steps: ProcessStep[];
+  transitions: ProcessTransition[];
   findings: ProcessFinding[];
   hypotheses: CauseHypothesis[];
   countermeasures: Countermeasure[];
@@ -95,6 +114,7 @@ export interface QccCase {
   engine?: "规则引擎" | "AI模型" | "AI失败后规则引擎";
   createdAt: string;
   updatedAt: string;
+  version: number;
 }
 
 export interface CaseSummary {

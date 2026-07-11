@@ -58,6 +58,21 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
   overview.getColumn(1).eachCell((cell, row) => { if (row > 3) { cell.font = { bold: true, color: { argb: `FF${navy}` } }; cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: `FF${pale}` } }; } });
   finishSheet(overview);
 
+  const process = workbook.addWorksheet("AS IS流程");
+  setupSheet(process, "AS IS关键流程与流转关系", [
+    { header: "序号", key: "order", width: 8 }, { header: "节点类型", key: "type", width: 12 }, { header: "步骤", key: "name", width: 24 },
+    { header: "主责", key: "owner", width: 18 }, { header: "输入", key: "input", width: 24 }, { header: "实际活动", key: "activity", width: 35 },
+    { header: "输出", key: "output", width: 24 }, { header: "标准/时限", key: "standard", width: 24 }, { header: "异常事实", key: "anomaly", width: 32 }, { header: "流转关系", key: "routing", width: 45 },
+  ]);
+  item.steps.forEach((step) => {
+    const routing = item.transitions.filter((transition) => transition.sourceNodeId === step.id).sort((a, b) => a.order - b.order).map((transition) => {
+      const target = item.steps.find((candidate) => candidate.id === transition.targetNodeId)?.name || "未知目标";
+      return transition.transitionType === "CONDITION" ? `${transition.branchName}（${transition.conditionExpression || "未填写条件"}）→ ${target}` : `→ ${target}`;
+    }).join("；");
+    process.addRow({ order: step.order, type: step.nodeType === "ACTION" ? "普通步骤" : step.nodeType === "DECISION" ? "判断节点" : "结束节点", name: step.name, owner: step.owner, input: step.input, activity: step.activity, output: step.output, standard: step.standard, anomaly: step.anomaly, routing });
+  });
+  finishSheet(process);
+
   const findings = workbook.addWorksheet("流程断点清单");
   setupSheet(findings, "流程断点清单", [
     { header: "流程步骤", key: "step", width: 20 }, { header: "断点类型", key: "category", width: 12 }, { header: "诊断结论", key: "title", width: 26 },

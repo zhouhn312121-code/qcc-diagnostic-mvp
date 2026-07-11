@@ -1,11 +1,14 @@
 import { NextResponse } from "next/server";
-import { caseCount, listCases, saveCase } from "@/lib/db";
+import { caseCount, listCases, markSamplesInitialized, samplesWereInitialized, saveCase } from "@/lib/db";
 import { createEmptyCase } from "@/lib/case-utils";
 import { sampleCases } from "@/lib/samples";
 import type { QccCase } from "@/lib/types";
 
 function ensureSamples() {
-  if (caseCount() === 0) sampleCases().forEach(saveCase);
+  if (!samplesWereInitialized()) {
+    if (caseCount() === 0) sampleCases().forEach(saveCase);
+    markSamplesInitialized();
+  }
 }
 
 export async function GET() {

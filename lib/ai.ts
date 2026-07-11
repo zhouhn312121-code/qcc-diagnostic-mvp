@@ -57,7 +57,7 @@ export async function diagnoseWithAi(item: QccCase): Promise<{ findings: Process
 }
 只为高优先级断点生成原因假设，hypotheses最多12项。`, {
     problem: { title: item.title, type: item.problemType, object: item.object, location: item.location, period: item.period, frequency: item.frequency, impact: item.impact, metric: item.metric, baseline: item.baseline, target: item.target, dataDefinition: item.dataDefinition },
-    process: { start: item.processStart, end: item.processEnd, owner: item.processOwner, steps: item.steps },
+    process: { start: item.processStart, end: item.processEnd, owner: item.processOwner, steps: item.steps.filter((step) => step.nodeType !== "END"), transitions: item.transitions },
   });
   const parsed = diagnosisSchema.parse(raw);
   const findings = parsed.findings.map((finding) => ({ ...finding, id: makeId("finding") }));
