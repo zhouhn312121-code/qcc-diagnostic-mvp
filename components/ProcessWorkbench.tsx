@@ -1,0 +1,248 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import { Background, Controls, Handle, MarkerType, MiniMap, Position, ReactFlow, type Connection, type Edge, type Node, type NodeProps } from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
+import { AlertTriangle, FileImage, GitBranch, HelpCircle, ListPlus, Maximize2, Pencil, PanelLeftClose, Plus, Redo2, Sparkles, Trash2, Undo2, Upload, X } from "lucide-react";
+import { makeId } from "@/lib/ids";
+import { problemCategories, processLocationTypes, type ProcessFact, type ProcessLocationType, type ProcessStep, type ProcessTransition, type QccCase, type ToBeProcess } from "@/lib/types";
+import type { MaterialCandidate } from "@/lib/materials";
+import { DrawioWorkbench } from "@/components/DrawioWorkbench";
+import { validateVisionProcess, visionResultToProcess, type VisionProcessResult } from "@/lib/process-vision";
+
+type NodeData = { label: string; owner: string; nodeType: ProcessStep["nodeType"]; issueCount: number; onSelect?: () => void };
+function FlowNode({ data, selected }: NodeProps<Node<NodeData>>) { return <div onClick={data.onSelect} className={`flow-edit-node ${data.nodeType.toLowerCase()} ${selected ? "selected" : ""}`}><Handle className="connect-handle target" type="target" position={Position.Left}/><small>{data.owner || "待指定"}</small><strong>{data.label || "未命名步骤"}</strong>{data.issueCount > 0 && <em><AlertTriangle size={10}/>{data.issueCount}</em>}<Handle className="connect-handle source" type="source" position={Position.Right}/><span className="connect-tip">从右侧端口拖出连线</span></div>; }
+const nodeTypes = { process: FlowNode };
+
+function nodesFrom(steps: ProcessStep[], facts: ProcessFact[], select?: (id: string) => void): Node<NodeData>[] { return steps.map((step) => ({ id: step.id, type: "process", position: { x: step.positionX, y: step.positionY }, data: { label: step.nodeType === "DECISION" ? step.decisionTitle || step.name : step.name, owner: step.owner, nodeType: step.nodeType, issueCount: facts.filter((fact) => fact.anchorType === "NODE" && fact.anchorId === step.id).length, onSelect: select ? () => select(step.id) : undefined } })); }
+function edgesFrom(transitions: ProcessTransition[]): Edge[] { return transitions.map((transition) => ({ id: transition.id, source: transition.sourceNodeId, target: transition.targetNodeId, label: transition.branchName, markerEnd: { type: MarkerType.ArrowClosed }, style: { strokeWidth: 2, stroke: "#60758d" } })); }
+
+export function ProcessCanvas({ steps, transitions, facts, onChange, editable = true }: { steps: ProcessStep[]; transitions: ProcessTransition[]; facts: ProcessFact[]; onChange?: (steps: ProcessStep[], transitions: ProcessTransition[]) => void; editable?: boolean }) {
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
+  const [paletteOpen, setPaletteOpen] = useState(true);
+  const [propertiesOpen, setPropertiesOpen] = useState(true);
+  const [fullScreen, setFullScreen] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
+  const undoStack = useRef<Array<{ steps: ProcessStep[]; transitions: ProcessTransition[] }>>([]);
+  const redoStack = useRef<Array<{ steps: ProcessStep[]; transitions: ProcessTransition[] }>>([]);
+  const selected = steps.find((step) => step.id === selectedId);
+  const selectedEdge = transitions.find((transition) => transition.id === selectedEdgeId);
+  const nodes = nodesFrom(steps, facts, editable ? setSelectedId : undefined);
+  const edges = edgesFrom(transitions);
+  function commit(nextSteps: ProcessStep[], nextTransitions: ProcessTransition[], record = true) {
+    if (!onChange) return;
+    if (record) { undoStack.current.push({ steps, transitions }); redoStack.current = []; }
+    onChange(nextSteps.map((step, index) => ({ ...step, order: index + 1 })), nextTransitions);
+  }
+  function undo() { const previous = undoStack.current.pop(); if (!previous) return; redoStack.current.push({ steps, transitions }); onChange?.(previous.steps, previous.transitions); setSelectedId(null); setSelectedEdgeId(null); }
+  function redo() { const next = redoStack.current.pop(); if (!next) return; undoStack.current.push({ steps, transitions }); onChange?.(next.steps, next.transitions); setSelectedId(null); setSelectedEdgeId(null); }
+  function updateStep(patch: Partial<ProcessStep>) { if (!selected) return; commit(steps.map((step) => step.id === selected.id ? { ...step, ...patch } : step), transitions); }
+  function addStep(nodeType: ProcessStep["nodeType"], position?: { x: number; y: number }) {
+    if (!onChange || steps.length >= 20) return;
+    const id = makeId("step");
+    const next: ProcessStep = { id, order: steps.length + 1, name: nodeType === "START" ? "流程开始" : nodeType === "DECISION" ? "新判断" : nodeType === "END" ? "流程结束" : "新步骤", owner: "", input: "", activity: "", output: "", standard: "", anomaly: "", nodeType, routingMode: "SPECIFIED", decisionTitle: nodeType === "DECISION" ? "是否满足条件？" : "", decisionBasis: "", positionX: position?.x ?? 180 + steps.length * 60, positionY: position?.y ?? 300, lane: "" };
+    commit([...steps, next], transitions); setSelectedId(id); setSelectedEdgeId(null);
+  }
+  function insertAfterSelected() {
+    if (!selected || selected.nodeType === "END" || steps.length >= 20) return;
+    const id = makeId("step");
+    const next: ProcessStep = { id, order: selected.order + 1, name: "新步骤", owner: selected.owner, input: "", activity: "", output: "", standard: "", anomaly: "", nodeType: "ACTION", routingMode: "SPECIFIED", decisionTitle: "", decisionBasis: "", positionX: selected.positionX + 210, positionY: selected.positionY, lane: selected.lane };
+    const outgoing = transitions.filter((transition) => transition.sourceNodeId === selected.id);
+    const rewired = transitions.map((transition) => transition.sourceNodeId === selected.id ? { ...transition, sourceNodeId: id } : transition);
+    const bridge: ProcessTransition = { id: makeId("transition"), sourceNodeId: selected.id, targetNodeId: id, transitionType: "DEFAULT", branchName: "", conditionExpression: "", isDefault: true, order: 1 };
+    commit([...steps.slice(0, selected.order), next, ...steps.slice(selected.order)], outgoing.length ? [...rewired, bridge] : [...transitions, bridge]); setSelectedId(id);
+  }
+  function removeSelected() {
+    const linkedFacts = selected ? facts.filter((fact) => fact.anchorType === "NODE" && fact.anchorId === selected.id || fact.anchorType === "EDGE" && transitions.some((edge) => edge.id === fact.anchorId && (edge.sourceNodeId === selected.id || edge.targetNodeId === selected.id))).length : 0;
+    if (!selected || !window.confirm(`确认删除节点“${selected.name || "未命名步骤"}”？相关连线将同时删除${linkedFacts ? `，并移除${linkedFacts}条失效异常事实` : ""}；已有诊断将标记为需要重新诊断。`)) return;
+    commit(steps.filter((step) => step.id !== selected.id), transitions.filter((transition) => transition.sourceNodeId !== selected.id && transition.targetNodeId !== selected.id)); setSelectedId(null);
+  }
+  function arrange() { commit(steps.map((step, index) => ({ ...step, positionX: 80 + (index % 5) * 210, positionY: 90 + Math.floor(index / 5) * 150 })), transitions); }
+  return <div className={`process-editor ${editable ? "with-tools" : ""} ${fullScreen ? "process-fullscreen" : ""} ${!paletteOpen ? "palette-collapsed" : ""} ${!propertiesOpen ? "properties-collapsed" : ""}`}>
+    {editable && paletteOpen && <aside className="node-palette"><div className="palette-title"><strong>节点库</strong><button title="收起节点库" onClick={() => setPaletteOpen(false)}><PanelLeftClose size={14}/></button></div><button onClick={() => addStep("START")}><Plus size={13}/>开始节点</button><button onClick={() => addStep("ACTION")}><Plus size={13}/>普通步骤</button><button onClick={() => addStep("DECISION")}><Plus size={13}/>判断节点</button><button onClick={() => addStep("END")}><Plus size={13}/>结束节点</button><span>选择节点后可插入下一步或删除；也可从节点右侧端口拖出箭头。</span></aside>}
+    <div className="process-canvas"><div className="canvas-toolbar">{editable && <><button onClick={undo} disabled={!undoStack.current.length} title="撤销"><Undo2 size={14}/></button><button onClick={redo} disabled={!redoStack.current.length} title="重做"><Redo2 size={14}/></button><button onClick={arrange}>自动排列</button>{!paletteOpen && <button onClick={() => setPaletteOpen(true)}>显示节点库</button>}{!propertiesOpen && <button onClick={() => setPropertiesOpen(true)}>显示属性</button>}<button onClick={() => setShowHelp(!showHelp)}><HelpCircle size={14}/>操作帮助</button></>}<button onClick={() => setFullScreen(!fullScreen)}><Maximize2 size={14}/>{fullScreen ? "退出全屏" : "全屏"}</button></div>{showHelp && <div className="canvas-help">① 从节点库新增节点　② 选择节点可编辑、插入或删除　③ 从右侧蓝色端口拖到目标节点形成箭头　④ 点击箭头可编辑分支条件或删除。</div>}<ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} fitView nodesDraggable={editable} nodesConnectable={editable} edgesFocusable={editable} onNodeClick={(_, node) => { setSelectedId(node.id); setSelectedEdgeId(null); }} onEdgeClick={(_, edge) => { setSelectedEdgeId(edge.id); setSelectedId(null); }} onNodesChange={(changes) => { if (!onChange) return; const moved: Record<string, { x: number; y: number }> = {}; for (const change of changes) if (change.type === "position" && change.position && !change.dragging) moved[change.id] = change.position; if (Object.keys(moved).length) commit(steps.map((step) => moved[step.id] ? { ...step, positionX: moved[step.id].x, positionY: moved[step.id].y } : step), transitions); }} onConnect={(connection: Connection) => { if (!connection.source || !connection.target || connection.source === connection.target) return; if (transitions.some((transition) => transition.sourceNodeId === connection.source && transition.targetNodeId === connection.target)) return; const source = steps.find((step) => step.id === connection.source); commit(steps, [...transitions, { id: makeId("transition"), sourceNodeId: connection.source, targetNodeId: connection.target, transitionType: source?.nodeType === "DECISION" ? "CONDITION" : "DEFAULT", branchName: source?.nodeType === "DECISION" ? `分支${transitions.filter((transition) => transition.sourceNodeId === connection.source).length + 1}` : "", conditionExpression: "", isDefault: true, order: transitions.filter((transition) => transition.sourceNodeId === connection.source).length + 1 }]); }}><Background gap={18}/><Controls/><MiniMap pannable zoomable/></ReactFlow></div>
+    {editable && propertiesOpen && <aside className="node-properties"><div className="palette-title"><strong>{selectedEdge ? "连线属性" : "节点属性"}</strong><button title="收起属性" onClick={() => setPropertiesOpen(false)}><X size={14}/></button></div>{selected ? <div className="property-fields"><div className="node-quick-actions"><button onClick={insertAfterSelected} disabled={selected.nodeType === "END" || steps.length >= 20}><ListPlus size={13}/>插入下一步</button><button className="danger" onClick={removeSelected}><Trash2 size={13}/>删除节点</button></div><label>步骤名称<input value={selected.name} onChange={(event) => updateStep({ name: event.target.value })}/></label><label>主责<input value={selected.owner} onChange={(event) => updateStep({ owner: event.target.value, lane: event.target.value })}/></label><label>输入<input value={selected.input} onChange={(event) => updateStep({ input: event.target.value })}/></label><label>实际活动<textarea value={selected.activity} onChange={(event) => updateStep({ activity: event.target.value })}/></label><label>输出<input value={selected.output} onChange={(event) => updateStep({ output: event.target.value })}/></label><label>标准/时限<input value={selected.standard} onChange={(event) => updateStep({ standard: event.target.value })}/></label><TransitionEditor step={selected} steps={steps} transitions={transitions} change={(next) => commit(steps, next)}/></div> : selectedEdge ? <div className="property-fields"><label>流转名称<input value={selectedEdge.branchName} placeholder="普通箭头可留空；判断分支填写是/否" onChange={(event) => commit(steps, transitions.map((edge) => edge.id === selectedEdge.id ? { ...edge, branchName: event.target.value } : edge))}/></label><label>判断条件<input value={selectedEdge.conditionExpression} onChange={(event) => commit(steps, transitions.map((edge) => edge.id === selectedEdge.id ? { ...edge, conditionExpression: event.target.value } : edge))}/></label><button className="btn danger" onClick={() => { commit(steps, transitions.filter((edge) => edge.id !== selectedEdge.id)); setSelectedEdgeId(null); }}><Trash2 size={13}/>删除连线</button></div> : <p>点击画布中的节点或箭头编辑属性。</p>}</aside>}
+  </div>;
+}
+
+function TransitionEditor({ step, steps, transitions, change }: { step: ProcessStep; steps: ProcessStep[]; transitions: ProcessTransition[]; change: (transitions: ProcessTransition[]) => void }) {
+  const outgoing = transitions.filter((transition) => transition.sourceNodeId === step.id).sort((a, b) => a.order - b.order); const targets = steps.filter((candidate) => candidate.id !== step.id);
+  function add() { const target = targets.find((candidate) => !outgoing.some((transition) => transition.targetNodeId === candidate.id)); if (!target) return; change([...transitions, { id: makeId("transition"), sourceNodeId: step.id, targetNodeId: target.id, transitionType: step.nodeType === "DECISION" ? "CONDITION" : "DEFAULT", branchName: step.nodeType === "DECISION" ? `分支${outgoing.length + 1}` : "", conditionExpression: "", isDefault: outgoing.length === 0, order: outgoing.length + 1 }]); }
+  function patch(id: string, value: Partial<ProcessTransition>) { change(transitions.map((transition) => transition.id === id ? { ...transition, ...value } : transition)); }
+  return <section className="transition-editor"><div><strong>流转关系</strong><button type="button" onClick={add} disabled={!targets.length || step.nodeType === "END"}><Plus size={12}/>添加</button></div>{step.nodeType === "END" ? <p>结束节点不能设置后续流转。</p> : outgoing.length ? outgoing.map((transition, index) => <article key={transition.id}><header><b>{step.nodeType === "DECISION" ? `分支 ${index + 1}` : "下一步"}</b><button type="button" aria-label="删除流转" onClick={() => change(transitions.filter((candidate) => candidate.id !== transition.id))}><X size={12}/></button></header><label>流转至<select value={transition.targetNodeId} onChange={(event) => patch(transition.id, { targetNodeId: event.target.value })}>{targets.map((target) => <option key={target.id} value={target.id}>{target.name || `步骤${target.order}`}</option>)}</select></label>{step.nodeType === "DECISION" && <><label>分支名称<input value={transition.branchName} placeholder="例如：是 / 否" onChange={(event) => patch(transition.id, { branchName: event.target.value, transitionType: "CONDITION" })}/></label><label>判断条件<input value={transition.conditionExpression} placeholder="例如：库存≥需求量" onChange={(event) => patch(transition.id, { conditionExpression: event.target.value })}/></label></>}</article>) : <p>尚未设置后续流转，请点击“添加”选择下一节点。</p>}</section>;
+}
+
+export function UploadSimulator({ onUseCurrent, onApply }: { onUseCurrent: () => void; onApply: (steps: ProcessStep[], transitions: ProcessTransition[]) => void }) {
+  const [service, setService] = useState<{ configured: boolean; provider?: string; model?: string }>({ configured: false });
+  const [file, setFile] = useState<File | null>(null);
+  const [preview, setPreview] = useState("");
+  const [recognizing, setRecognizing] = useState(false);
+  const [result, setResult] = useState<VisionProcessResult | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => { void fetch("/api/process-vision/status").then((response) => response.json()).then((data) => setService({ configured: Boolean(data.configured), provider: data.provider, model: data.model })).catch(() => setService({ configured: false })); }, []);
+  useEffect(() => {
+    if (!file || !file.type.startsWith("image/")) { setPreview(""); return; }
+    const url = URL.createObjectURL(file); setPreview(url); return () => URL.revokeObjectURL(url);
+  }, [file]);
+  const validationIssues = result ? validateVisionProcess(result) : [];
+  async function recognize() {
+    if (!file) return;
+    setRecognizing(true); setError(""); setResult(null);
+    try {
+      const form = new FormData(); form.append("file", file);
+      const response = await fetch("/api/process-vision/analyze", { method: "POST", body: form });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "流程图识别失败");
+      setResult(data.result);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "流程图识别失败"); }
+    finally { setRecognizing(false); }
+  }
+  function patchNode(id: string, patch: Partial<VisionProcessResult["nodes"][number]>) {
+    if (!result) return; setResult({ ...result, nodes: result.nodes.map((node) => node.id === id ? { ...node, ...patch } : node) });
+  }
+  function patchTransition(id: string, patch: Partial<VisionProcessResult["transitions"][number]>) {
+    if (!result) return; setResult({ ...result, transitions: result.transitions.map((edge) => edge.id === id ? { ...edge, ...patch } : edge) });
+  }
+  function addNode() {
+    if (!result || result.nodes.length >= 20) return;
+    setResult({ ...result, nodes: [...result.nodes, { id: makeId("vision-node"), name: "新活动", nodeType: "ACTION", owner: "", lane: "", input: "", activity: "", output: "", standard: "", confidence: 1 }] });
+  }
+  function removeNode(id: string) {
+    if (!result) return;
+    setResult({ ...result, nodes: result.nodes.filter((node) => node.id !== id), transitions: result.transitions.filter((edge) => edge.sourceNodeId !== id && edge.targetNodeId !== id) });
+  }
+  function addTransition() {
+    if (!result || result.nodes.length < 2) return;
+    setResult({ ...result, transitions: [...result.transitions, { id: makeId("vision-edge"), sourceNodeId: result.nodes[0].id, targetNodeId: result.nodes[1].id, branchName: "", conditionExpression: "", confidence: 1 }] });
+  }
+  function apply() {
+    if (!result || validationIssues.length) return;
+    if (!window.confirm(`确认用识别出的${result.nodes.length}个节点和${result.transitions.length}条连线替换当前AS IS流程？`)) return;
+    const process = visionResultToProcess(result); onApply(process.steps, process.transitions);
+  }
+  return <div className="vision-upload">
+    <div className="vision-upload-head"><div><strong>上传已有流程图</strong><p>支持PNG、JPG、WebP和PDF（最多5页）。AI只生成候选结构，人工确认后才应用到正式AS IS。</p></div><span className={`badge ${service.configured ? "green" : "gray"}`}>{service.configured ? `${service.provider} · ${service.model}` : "视觉API待配置"}</span></div>
+    <label className="vision-drop"><FileImage size={32}/><strong>{file ? file.name : "选择流程图图片或PDF"}</strong><span>{file ? `${Math.ceil(file.size / 1024)} KB` : "文件只用于本次识别；未确认前不会修改正式流程"}</span><span className="btn blue"><Upload size={15}/>选择文件</span><input type="file" accept="image/png,image/jpeg,image/webp,.pdf" onChange={(event) => { setFile(event.target.files?.[0] || null); setResult(null); setError(""); }}/></label>
+    {file && !result && <div className="vision-preview">{preview ? <img src={preview} alt="待识别流程图预览"/> : <div><FileImage size={28}/><strong>{file.name}</strong><span>将逐页识别PDF中的节点、箭头和泳道</span></div>}<div className="vision-status"><strong>{service.configured ? "文件已就绪，可以开始视觉识别" : "尚未配置视觉识别服务"}</strong><p>{service.configured ? "识别结果将进入节点、连线、泳道和不确定项确认。" : "配置VISION_API_KEY后即可调用千问视觉模型；当前仍可人工还原。"}</p>{error && <p className="vision-error">{error}</p>}<div><button className="btn ghost" onClick={onUseCurrent}>转到智能流程搭建</button><button className="btn primary" disabled={!service.configured || recognizing} onClick={() => void recognize()}><Sparkles size={15}/>{recognizing ? "正在识别…" : "开始AI识图"}</button></div></div></div>}
+    {result && <section className="vision-result">
+      <div className="vision-result-head"><div><strong>识别结果确认</strong><p>{result.summary || "请逐项核对节点与箭头。空缺的业务字段可应用后在流程明细中补充。"}</p></div><div><span>{result.lanes.length}个泳道</span><span>{result.nodes.length}个节点</span><span>{result.transitions.length}条连线</span></div></div>
+      {validationIssues.length > 0 && <div className="callout warn"><AlertTriangle size={17}/><div><strong>应用前需修正流程结构</strong><ul className="issues">{validationIssues.map((issue) => <li key={issue}>{issue}</li>)}</ul></div></div>}
+      <div className="vision-subhead"><strong>识别节点</strong><button className="btn ghost" disabled={result.nodes.length >= 20} onClick={addNode}><Plus size={13}/>补充节点</button></div>
+      <div className="vision-table-wrap"><table className="vision-confirm-table"><thead><tr><th>类型</th><th>节点名称</th><th>责任/泳道</th><th>输入</th><th>实际活动</th><th>输出</th><th>标准/时限</th><th>置信度</th><th></th></tr></thead><tbody>{result.nodes.map((node) => <tr key={node.id}><td><select value={node.nodeType} onChange={(event) => patchNode(node.id, { nodeType: event.target.value as typeof node.nodeType })}><option value="START">开始</option><option value="ACTION">活动</option><option value="DECISION">判断</option><option value="END">结束</option></select></td><td><input value={node.name} onChange={(event) => patchNode(node.id, { name: event.target.value })}/></td><td><input value={node.owner || node.lane} onChange={(event) => patchNode(node.id, { owner: event.target.value, lane: event.target.value })}/></td><td><input value={node.input} onChange={(event) => patchNode(node.id, { input: event.target.value })}/></td><td><input value={node.activity} onChange={(event) => patchNode(node.id, { activity: event.target.value })}/></td><td><input value={node.output} onChange={(event) => patchNode(node.id, { output: event.target.value })}/></td><td><input value={node.standard} onChange={(event) => patchNode(node.id, { standard: event.target.value })}/></td><td>{Math.round(node.confidence * 100)}%</td><td><button className="icon-btn" title="删除识别节点" onClick={() => removeNode(node.id)}><Trash2 size={13}/></button></td></tr>)}</tbody></table></div>
+      <div className="vision-edges"><div className="vision-subhead"><strong>箭头与判断分支</strong><button className="btn ghost" onClick={addTransition}><Plus size={13}/>补充连线</button></div>{result.transitions.map((edge) => <div key={edge.id}><select value={edge.sourceNodeId} onChange={(event) => patchTransition(edge.id, { sourceNodeId: event.target.value })}>{result.nodes.map((node) => <option key={node.id} value={node.id}>{node.name}</option>)}</select><span>→</span><select value={edge.targetNodeId} onChange={(event) => patchTransition(edge.id, { targetNodeId: event.target.value })}>{result.nodes.map((node) => <option key={node.id} value={node.id}>{node.name}</option>)}</select><input placeholder="分支名称（是/否）" value={edge.branchName} onChange={(event) => patchTransition(edge.id, { branchName: event.target.value })}/><input placeholder="判断条件" value={edge.conditionExpression} onChange={(event) => patchTransition(edge.id, { conditionExpression: event.target.value })}/><button className="icon-btn" title="删除识别连线" onClick={() => setResult({ ...result, transitions: result.transitions.filter((candidate) => candidate.id !== edge.id) })}><Trash2 size={13}/></button></div>)}</div>
+      {result.uncertainties.length > 0 && <div className="vision-uncertainties"><strong>需要人工确认（{result.uncertainties.length}）</strong>{result.uncertainties.map((item) => <p key={item.id}><HelpCircle size={14}/><span>{item.question}{item.suggestion ? `；建议：${item.suggestion}` : ""}</span><small>{Math.round(item.confidence * 100)}%</small></p>)}</div>}
+      <div className="vision-actions"><button className="btn ghost" onClick={() => setResult(null)}>重新识别</button><button className="btn primary" disabled={validationIssues.length > 0} onClick={apply}>确认并应用到AS IS</button></div>
+    </section>}
+  </div>;
+}
+
+export function FactsPanel({ item, update }: { item: QccCase; update: (item: QccCase) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [extracting, setExtracting] = useState(false);
+  const [materialName, setMaterialName] = useState("");
+  const [candidates, setCandidates] = useState<MaterialCandidate[]>([]);
+  const [materialError, setMaterialError] = useState("");
+  const emptyDraft = { anchorType: "NODE" as ProcessFact["anchorType"], anchorId: item.steps[0]?.id || "", description: "", frequency: "", impact: "", evidenceType: "现场观察", evidenceNote: "", evidenceSource: "", evidencePeriod: "", sampleSize: "", evidenceStatus: "待补证" as ProcessFact["evidenceStatus"], attachmentName: "", problemCategory: "流程类" as ProcessFact["problemCategory"], problemTag: "", sourceType: "MANUAL" as const, sourceFile: "", sourceLocation: "", sourceQuote: "" };
+  const [draft, setDraft] = useState(emptyDraft);
+  function edgeLabel(id: string) { const edge = item.transitions.find((value) => value.id === id); if (!edge) return "流程交接"; const source = item.steps.find((step) => step.id === edge.sourceNodeId)?.name || "?"; const target = item.steps.find((step) => step.id === edge.targetNodeId)?.name || "?"; return `${source}${edge.branchName ? ` — ${edge.branchName}${edge.conditionExpression ? `/${edge.conditionExpression}` : ""}` : ""} → ${target}`; }
+  function patchFact(id: string, patch: Partial<ProcessFact>) { update({ ...item, processFacts: item.processFacts.map((fact) => fact.id === id ? { ...fact, ...patch } : fact) }); }
+  function add() {
+    if (!draft.description.trim()) return;
+    const anchorId = draft.anchorType === "GLOBAL" ? "global" : draft.anchorId;
+    const step = item.steps.find((candidate) => candidate.id === anchorId);
+    const fact: ProcessFact = { id: makeId("fact"), ...draft, anchorId, anchorLabel: draft.anchorType === "GLOBAL" ? "全流程" : draft.anchorType === "EDGE" ? edgeLabel(anchorId) : step?.name || "未命名节点" };
+    update({ ...item, processFacts: [...item.processFacts, fact] }); setEditing(false); setDraft(emptyDraft);
+  }
+  async function parseFile(file?: File) {
+    if (!file) return;
+    setExtracting(true); setMaterialError(""); setCandidates([]); setMaterialName(file.name);
+    try {
+      const form = new FormData(); form.append("file", file); form.append("caseId", item.id);
+      const response = await fetch("/api/materials/parse", { method: "POST", body: form });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "文件解读失败");
+      setCandidates(data.candidates || []);
+    } catch (error) { setMaterialError(error instanceof Error ? error.message : "文件解读失败"); }
+    finally { setExtracting(false); }
+  }
+  function importCandidate(candidate: MaterialCandidate) {
+    const fact: ProcessFact = { id: makeId("fact"), anchorType: candidate.anchorType, anchorId: "global", anchorLabel: "全流程", description: candidate.description, frequency: "", impact: "", evidenceType: "文件", evidenceNote: "由材料解读生成，已人工确认导入", evidenceSource: materialName, evidencePeriod: "", sampleSize: "", evidenceStatus: "待补证", attachmentName: materialName, problemCategory: candidate.problemCategory, problemTag: candidate.problemTag, sourceType: "DOCUMENT", sourceFile: materialName, sourceLocation: candidate.sourceLocation, sourceQuote: candidate.sourceQuote };
+    update({ ...item, processFacts: [...item.processFacts, fact] });
+    setCandidates((values) => values.filter((value) => value !== candidate));
+  }
+  return <>
+    <div className="panel-title"><div><h3>流程问题分析</h3><p>按组织、流程、IT、规则分类记录事实；问题类型与流程定位分开管理。</p></div><button className="btn blue" onClick={() => setEditing(true)}><Plus size={14}/>添加事实</button></div>
+    <div className="material-import">
+      <div><strong>从材料中解读问题</strong><p>支持DOCX、XLSX和文字型PDF，单个文件不超过10MB。原文件只在本次请求中解析，不长期保存。</p></div>
+      <label className="btn ghost"><Upload size={15}/>{extracting ? "正在解读…" : "选择文件"}<input type="file" accept=".docx,.xlsx,.pdf" disabled={extracting} onChange={(event) => void parseFile(event.target.files?.[0])}/></label>
+    </div>
+    {materialError && <div className="callout warn"><AlertTriangle size={17}/><div>{materialError}</div></div>}
+    {candidates.length > 0 && <div className="material-candidates"><div className="panel-title"><div><h4>待确认候选问题（{candidates.length}）</h4><p>系统不会自动写入正式问题；请逐条确认。</p></div><button className="btn ghost" onClick={() => setCandidates([])}>忽略全部</button></div>{candidates.map((candidate, index) => <article key={`${candidate.sourceLocation}-${index}`}><div><span className="badge blue">{candidate.problemCategory}</span><span className="badge gray">{candidate.problemTag}</span><strong>{candidate.description}</strong><small>{materialName} · {candidate.sourceLocation} · 置信度 {Math.round(candidate.confidence * 100)}%</small></div><button className="btn primary" onClick={() => importCandidate(candidate)}>确认导入</button></article>)}</div>}
+    <div className="fact-cards">{item.processFacts.map((fact) => <article key={fact.id}><span className={`fact-anchor ${fact.anchorType.toLowerCase()}`}>{fact.anchorType === "NODE" ? "节点" : fact.anchorType === "EDGE" ? "交接" : "全流程"}</span><div><small>{fact.anchorLabel} · {fact.problemCategory}{fact.problemTag ? ` / ${fact.problemTag}` : ""}</small><strong>{fact.description}</strong>{fact.sourceType === "DOCUMENT" && <small>来源：{fact.sourceFile} · {fact.sourceLocation}</small>}<div className="fact-fields"><select value={fact.problemCategory} onChange={(event) => patchFact(fact.id, { problemCategory: event.target.value as ProcessFact["problemCategory"] })}>{problemCategories.map((category) => <option key={category}>{category}</option>)}</select><input placeholder="问题标签" value={fact.problemTag} onChange={(event) => patchFact(fact.id, { problemTag: event.target.value })}/><input placeholder="发生频次" value={fact.frequency} onChange={(event) => patchFact(fact.id, { frequency: event.target.value })}/><input placeholder="影响结果" value={fact.impact} onChange={(event) => patchFact(fact.id, { impact: event.target.value })}/><select value={fact.evidenceStatus} onChange={(event) => patchFact(fact.id, { evidenceStatus: event.target.value as ProcessFact["evidenceStatus"] })}><option>待补证</option><option>已确认</option><option>有争议</option></select><input placeholder="证据说明" value={fact.evidenceNote} onChange={(event) => patchFact(fact.id, { evidenceNote: event.target.value })}/></div></div><button className="icon-btn" aria-label={`删除事实：${fact.anchorLabel}`} onClick={() => update({ ...item, processFacts: item.processFacts.filter((candidate) => candidate.id !== fact.id) })}><X size={14}/></button></article>)}</div>
+    {!item.processFacts.length && <div className="empty-facts">尚未记录流程问题事实。</div>}
+    {editing && <div className="inline-fact-form expanded"><select value={draft.problemCategory} onChange={(event) => setDraft({ ...draft, problemCategory: event.target.value as ProcessFact["problemCategory"] })}>{problemCategories.map((category) => <option key={category}>{category}</option>)}</select><input placeholder="问题标签（例如：职责不清）" value={draft.problemTag} onChange={(event) => setDraft({ ...draft, problemTag: event.target.value })}/><select value={draft.anchorType} onChange={(event) => { const anchorType = event.target.value as ProcessFact["anchorType"]; setDraft({ ...draft, anchorType, anchorId: anchorType === "EDGE" ? item.transitions[0]?.id || "" : item.steps[0]?.id || "" }); }}><option value="NODE">节点定位</option><option value="EDGE">交接定位</option><option value="GLOBAL">全流程定位</option></select>{draft.anchorType !== "GLOBAL" && <select value={draft.anchorId} onChange={(event) => setDraft({ ...draft, anchorId: event.target.value })}>{draft.anchorType === "NODE" ? item.steps.map((step) => <option value={step.id} key={step.id}>{step.name || `步骤${step.order}`}</option>) : item.transitions.map((transition) => <option value={transition.id} key={transition.id}>{edgeLabel(transition.id)}</option>)}</select>}<textarea placeholder="用数据或现象描述实际发生了什么" value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })}/><select value={draft.evidenceType} onChange={(event) => setDraft({ ...draft, evidenceType: event.target.value })}><option>数据</option><option>访谈</option><option>现场观察</option><option>系统记录</option><option>文件</option></select><input placeholder="证据来源" value={draft.evidenceSource} onChange={(event) => setDraft({ ...draft, evidenceSource: event.target.value })}/><input placeholder="样本数量" value={draft.sampleSize} onChange={(event) => setDraft({ ...draft, sampleSize: event.target.value })}/><button className="btn primary" onClick={add}>保存事实</button><button className="btn ghost" onClick={() => setEditing(false)}>取消</button></div>}
+  </>;
+}
+
+type CandidateDraft = MaterialCandidate & { processLocationType: ProcessLocationType; locationText: string; relatedObject: string };
+
+export function GuidedFactsPanel({ item, update }: { item: QccCase; update: (item: QccCase) => void }) {
+  const createDraft = (): ProcessFact => ({ id: "", anchorType: "EDGE", anchorId: "", anchorLabel: "", description: "", frequency: "", impact: "", evidenceType: "现场观察", evidenceNote: "", evidenceSource: "", evidencePeriod: "", sampleSize: "", evidenceStatus: "待补证", attachmentName: "", problemCategory: "流程类", problemTag: "", processLocationType: "流程交接", locationText: "", relatedObject: "", sourceType: "MANUAL", sourceFile: "", sourceLocation: "", sourceQuote: "" });
+  const [editing, setEditing] = useState(item.processFacts.length === 0);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draft, setDraft] = useState<ProcessFact>(createDraft);
+  const [extracting, setExtracting] = useState(false);
+  const [materialName, setMaterialName] = useState("");
+  const [candidates, setCandidates] = useState<CandidateDraft[]>([]);
+  const [materialError, setMaterialError] = useState("");
+  const categoryHelp: Record<NonNullable<ProcessFact["problemCategory"]>, string> = { 组织类: "职责、权限、协同、人员能力", 流程类: "节点、交接、端到端运行问题", IT类: "系统、数据、接口、重复录入", 管理规则类: "策略及规则、制度等" };
+  const relatedLabel = draft.problemCategory === "组织类" ? "相关部门或岗位" : draft.problemCategory === "IT类" ? "相关系统或数据对象" : "策略及规则、制度等";
+  const locationPlaceholder = draft.processLocationType === "流程交接" ? "例如：销售评审 → 计划确认" : draft.processLocationType === "节点流程" ? "例如：订单评审节点" : "例如：销售订单履约全流程";
+  function anchorType(locationType: ProcessLocationType): ProcessFact["anchorType"] { return locationType === "流程交接" ? "EDGE" : locationType === "节点流程" ? "NODE" : "GLOBAL"; }
+  function selectCategory(category: NonNullable<ProcessFact["problemCategory"]>) {
+    setDraft((value) => category === "流程类" ? { ...value, problemCategory: category, relatedObject: "", anchorType: anchorType(value.processLocationType || "流程交接") } : { ...value, problemCategory: category, anchorType: "GLOBAL", anchorId: "global", locationText: "" });
+  }
+  function saveFact() {
+    if (!draft.description.trim()) return;
+    if (draft.problemCategory === "流程类" && !draft.locationText?.trim()) return;
+    if (draft.problemCategory !== "流程类" && !draft.relatedObject?.trim()) return;
+    const locationType = draft.processLocationType || "流程交接";
+    const label = draft.problemCategory === "流程类" ? draft.locationText!.trim() : draft.relatedObject!.trim();
+    const fact: ProcessFact = { ...draft, id: editingId || makeId("fact"), anchorType: draft.problemCategory === "流程类" ? anchorType(locationType) : "GLOBAL", anchorId: "global", anchorLabel: label, locationText: draft.problemCategory === "流程类" ? label : "", relatedObject: draft.problemCategory === "流程类" ? "" : label };
+    update({ ...item, processFacts: editingId ? item.processFacts.map((value) => value.id === editingId ? fact : value) : [...item.processFacts, fact] }); setDraft(createDraft()); setEditingId(null); setEditing(false);
+  }
+  function startAdd() { setDraft(createDraft()); setEditingId(null); setEditing(true); }
+  function startEdit(fact: ProcessFact) { setDraft({ ...createDraft(), ...fact }); setEditingId(fact.id); setEditing(true); }
+  function cancelEdit() { setDraft(createDraft()); setEditingId(null); setEditing(false); }
+  async function parseFile(file?: File) {
+    if (!file) return;
+    setExtracting(true); setMaterialError(""); setCandidates([]); setMaterialName(file.name);
+    try {
+      const form = new FormData(); form.append("file", file); form.append("caseId", item.id);
+      const response = await fetch("/api/materials/parse", { method: "POST", body: form }); const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "文件解读失败");
+      setCandidates((data.candidates || []).map((candidate: MaterialCandidate) => ({ ...candidate, processLocationType: "全流程", locationText: "", relatedObject: "" })));
+    } catch (error) { setMaterialError(error instanceof Error ? error.message : "文件解读失败"); }
+    finally { setExtracting(false); }
+  }
+  function patchCandidate(index: number, patch: Partial<CandidateDraft>) { setCandidates((values) => values.map((candidate, candidateIndex) => candidateIndex === index ? { ...candidate, ...patch } : candidate)); }
+  function importCandidate(index: number) {
+    const candidate = candidates[index]; if (!candidate) return;
+    const isProcess = candidate.problemCategory === "流程类";
+    const label = isProcess ? candidate.locationText.trim() : candidate.relatedObject.trim(); if (!label) return;
+    const fact: ProcessFact = { id: makeId("fact"), anchorType: isProcess ? anchorType(candidate.processLocationType) : "GLOBAL", anchorId: "global", anchorLabel: label, description: candidate.description, frequency: "", impact: "", evidenceType: "文件", evidenceNote: "由材料解读生成，已人工确认导入", evidenceSource: materialName, evidencePeriod: "", sampleSize: "", evidenceStatus: "待补证", attachmentName: materialName, problemCategory: candidate.problemCategory, problemTag: candidate.problemTag, processLocationType: candidate.processLocationType, locationText: isProcess ? label : "", relatedObject: isProcess ? "" : label, sourceType: "DOCUMENT", sourceFile: materialName, sourceLocation: candidate.sourceLocation, sourceQuote: candidate.sourceQuote };
+    update({ ...item, processFacts: [...item.processFacts, fact] }); setCandidates((values) => values.filter((_, candidateIndex) => candidateIndex !== index));
+  }
+  return <>
+    <div className="panel-title"><div><h3>流程问题分析</h3><p>先判断问题性质；只有流程类问题才需要选择流程位置。可手工录入，也可从材料中提取候选问题。</p></div><button className="btn blue" onClick={startAdd}><Plus size={14}/>添加问题事实</button></div>
+    <div className="material-import"><div><strong>从材料中提取候选问题</strong><p>Word、Excel或文字型PDF → 系统提取 → 人工确认分类和位置后写入。</p></div><label className="btn ghost"><Upload size={15}/>{extracting ? "正在解读…" : "选择文件"}<input type="file" accept=".docx,.xlsx,.pdf" disabled={extracting} onChange={(event) => void parseFile(event.target.files?.[0])}/></label></div>
+    {materialError && <div className="callout warn"><AlertTriangle size={17}/><div>{materialError}</div></div>}
+    {candidates.length > 0 && <div className="material-candidates"><div className="panel-title"><div><h4>待确认候选问题（{candidates.length}）</h4><p>补充问题对象或流程位置后再导入。</p></div><button className="btn ghost" onClick={() => setCandidates([])}>忽略全部</button></div>{candidates.map((candidate, index) => { const isProcess = candidate.problemCategory === "流程类"; return <article key={`${candidate.sourceLocation}-${index}`}><div className="candidate-body"><div className="candidate-controls"><select value={candidate.problemCategory} onChange={(event) => patchCandidate(index, { problemCategory: event.target.value as CandidateDraft["problemCategory"] })}>{problemCategories.map((category) => <option key={category}>{category}</option>)}</select>{isProcess && <select value={candidate.processLocationType} onChange={(event) => patchCandidate(index, { processLocationType: event.target.value as ProcessLocationType })}>{processLocationTypes.map((type) => <option key={type}>{type}</option>)}</select>}<input value={isProcess ? candidate.locationText : candidate.relatedObject} placeholder={isProcess ? "输入关联流程位置" : candidate.problemCategory === "组织类" ? "相关部门或岗位" : candidate.problemCategory === "IT类" ? "相关系统或数据对象" : "策略及规则、制度等"} onChange={(event) => patchCandidate(index, isProcess ? { locationText: event.target.value } : { relatedObject: event.target.value })}/></div><strong>{candidate.description}</strong><small>{materialName} · {candidate.sourceLocation} · 置信度 {Math.round(candidate.confidence * 100)}%</small></div><button className="btn primary" disabled={!(isProcess ? candidate.locationText : candidate.relatedObject).trim()} onClick={() => importCandidate(index)}>确认导入</button></article>; })}</div>}
+    {editing && <section className="fact-wizard"><div className="wizard-head"><div><h4>{editingId ? "编辑问题事实" : "新增问题事实"}</h4><p>按3步填写，系统根据问题类型只显示必要字段。</p></div>{item.processFacts.length > 0 && <button className="icon-btn" onClick={cancelEdit}><X size={16}/></button>}</div><fieldset><legend><span className="wizard-step">1</span>这个问题主要属于哪一类？</legend><div className="category-choices">{problemCategories.map((category) => <button type="button" key={category} className={draft.problemCategory === category ? "active" : ""} onClick={() => selectCategory(category)}><strong>{category}</strong><small>{categoryHelp[category]}</small></button>)}</div></fieldset><fieldset><legend><span className="wizard-step">2</span>{draft.problemCategory === "流程类" ? "流程问题发生在哪里？" : "问题涉及哪个对象？"}</legend>{draft.problemCategory === "流程类" ? <><div className="location-choices">{processLocationTypes.map((type) => <button type="button" key={type} className={draft.processLocationType === type ? "active" : ""} onClick={() => setDraft({ ...draft, processLocationType: type, anchorType: anchorType(type) })}><strong>{type}</strong><small>{type === "流程交接" ? "两个环节或岗位之间" : type === "节点流程" ? "某一个具体流程节点" : "端到端的共性问题"}</small></button>)}</div><label>关联位置<input value={draft.locationText || ""} placeholder={locationPlaceholder} onChange={(event) => setDraft({ ...draft, locationText: event.target.value, anchorLabel: event.target.value })}/><small>直接输入流程位置，例如“销售评审 → 计划确认”，不受下拉选项限制。</small></label></> : <label>{relatedLabel}<input value={draft.relatedObject || ""} placeholder={`请输入${relatedLabel}`} onChange={(event) => setDraft({ ...draft, relatedObject: event.target.value, anchorLabel: event.target.value })}/></label>}</fieldset><fieldset><legend><span className="wizard-step">3</span>记录实际发生的事实</legend><p className="fact-guide">建议按“发生场景 → 实际现象 → 频次或范围 → 造成影响”描述。</p><textarea value={draft.description} placeholder="例如：技术与计划通过群消息交接，回复时间不明确。" onChange={(event) => setDraft({ ...draft, description: event.target.value })}/><div className="wizard-fields"><input value={draft.frequency} placeholder="发生情况，例如近30单中8单" onChange={(event) => setDraft({ ...draft, frequency: event.target.value })}/><input value={draft.impact} placeholder="造成影响，例如交期反复调整" onChange={(event) => setDraft({ ...draft, impact: event.target.value })}/><select value={draft.evidenceType} onChange={(event) => setDraft({ ...draft, evidenceType: event.target.value })}><option>数据</option><option>系统记录</option><option>现场观察</option><option>访谈</option><option>文件</option></select><select value={draft.evidenceStatus} onChange={(event) => setDraft({ ...draft, evidenceStatus: event.target.value as ProcessFact["evidenceStatus"] })}><option>待补证</option><option>已确认</option><option>有争议</option></select><input value={draft.evidenceSource} placeholder="证据来源" onChange={(event) => setDraft({ ...draft, evidenceSource: event.target.value })}/><input value={draft.evidenceNote} placeholder="证据说明" onChange={(event) => setDraft({ ...draft, evidenceNote: event.target.value })}/></div><div className="fact-preview"><Sparkles size={16}/><div><strong>事实预览</strong><p>{`${draft.problemCategory === "流程类" ? draft.locationText || "未填写流程位置" : draft.relatedObject || `未填写${relatedLabel}`}存在“${draft.description || "未填写问题事实"}”${draft.frequency ? `，${draft.frequency}` : ""}${draft.impact ? `，造成${draft.impact}` : ""}。`}</p></div></div></fieldset><div className="wizard-actions">{item.processFacts.length > 0 && <button className="btn ghost" onClick={cancelEdit}>取消</button>}<button className="btn primary" disabled={!draft.description.trim() || !(draft.problemCategory === "流程类" ? draft.locationText : draft.relatedObject)?.trim()} onClick={saveFact}>{editingId ? "保存修改" : "保存问题事实"}</button></div></section>}
+    {item.processFacts.length > 0 && <div className="fact-summary-list"><div className="fact-list-head"><strong>已记录问题事实</strong><span>共{item.processFacts.length}条</span></div>{item.processFacts.map((fact) => { const isProcess = fact.problemCategory === "流程类"; return <article key={fact.id}><span className={`fact-anchor ${fact.anchorType.toLowerCase()}`}>{fact.problemCategory}</span><div><small>{isProcess ? `${fact.processLocationType || "全流程"} · ${fact.locationText || fact.anchorLabel}` : fact.relatedObject || fact.anchorLabel}</small><strong>{fact.description}</strong><p>{[fact.frequency && `发生情况：${fact.frequency}`, fact.impact && `影响：${fact.impact}`, `证据：${fact.evidenceStatus}`, fact.sourceType === "DOCUMENT" && `来源：${fact.sourceFile} ${fact.sourceLocation}`].filter(Boolean).join("　")}</p></div><div className="fact-card-actions"><button className="btn ghost" onClick={() => startEdit(fact)}><Pencil size={14}/>编辑</button><button className="icon-btn" aria-label={`删除事实：${fact.anchorLabel}`} onClick={() => update({ ...item, processFacts: item.processFacts.filter((candidate) => candidate.id !== fact.id) })}><Trash2 size={14}/></button></div></article>; })}</div>}
+  </>;
+}
+
+export function ToBeWorkbench({ item, update, generate, running }: { item: QccCase; update: (item: QccCase) => void; generate: (mode: "COPY" | "AI", replace?: boolean) => void; running: boolean }) { const [view, setView] = useState<"edit" | "compare" | "changes">("edit"); const [mode, setMode] = useState<"smart" | "drawio">("smart"); const tobe = item.toBeProcess; function change(steps: ProcessStep[], transitions: ProcessTransition[]) { if (!tobe) return; update({ ...item, toBeProcess: { ...tobe, steps, transitions, userEdited: true, reviewed: false }, toBeDrawio: item.toBeDrawio ? { ...item.toBeDrawio, syncStatus: "STALE" } : null }); } return <><div className="tobe-actions"><button className="btn ghost" onClick={() => generate("COPY", Boolean(tobe))} disabled={running}><GitBranch size={15}/>复制AS IS后编辑</button><button className="btn blue" onClick={() => generate("AI", Boolean(tobe))} disabled={running}>{running ? <span className="spinner"/> : <Sparkles size={15}/>}AI生成TO BE草案</button></div>{!tobe ? <div className="empty-tobe"><GitBranch/><strong>尚未创建 TO BE 流程</strong><span>完成根因验证后，可复制AS IS或由AI生成草案。</span></div> : <><div className="flow-tabs"><button className={view === "edit" ? "active" : ""} onClick={() => setView("edit")}>TO BE编辑</button><button className={view === "compare" ? "active" : ""} onClick={() => setView("compare")}>AS IS / TO BE对照</button><button className={view === "changes" ? "active" : ""} onClick={() => setView("changes")}>变更与落地</button></div>{view === "edit" && <><div className="editor-mode-switch"><button className={mode === "smart" ? "active" : ""} onClick={() => setMode("smart")}>智能流程搭建</button><button className={mode === "drawio" ? "active" : ""} onClick={() => setMode("drawio")}>draw.io自由绘制</button></div>{mode === "smart" ? <ProcessCanvas steps={tobe.steps} transitions={tobe.transitions} facts={[]} onChange={change}/> : <DrawioWorkbench item={item} stage="TO_BE" update={update}/>}</>} {view === "compare" && <div className="process-compare"><div><h4>AS IS当前流程</h4><ProcessCanvas steps={item.steps} transitions={item.transitions} facts={item.processFacts} editable={false}/></div><div><h4>TO BE未来流程</h4><ProcessCanvas steps={tobe.steps} transitions={tobe.transitions} facts={[]} editable={false}/></div></div>} {view === "changes" && <div className="change-list">{tobe.changes.map((change) => <article key={change.id}><span className="badge blue">{change.changeType}</span><strong>{change.description}</strong><small>追溯 {change.causeIds.length} 个已验证原因 · {change.measureIds.length} 项详细措施</small></article>)}</div>}</>}</>;
+}

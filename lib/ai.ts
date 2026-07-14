@@ -1,6 +1,7 @@
-import { diagnosisSchema, solutionsSchema } from "./schemas";
+import { diagnosisSchema, materialCandidatesSchema, solutionsSchema, toBeGenerationSchema } from "./schemas";
 import { makeId } from "./ids";
-import type { CauseHypothesis, Countermeasure, ProcessFinding, QccCase } from "./types";
+import type { CauseHypothesis, Countermeasure, ProcessFinding, QccCase, ToBeProcess } from "./types";
+import type { MaterialCandidate, MaterialSegment } from "./materials";
 
 const baseUrl = process.env.AI_BASE_URL?.replace(/\/$/, "");
 const apiKey = process.env.AI_API_KEY;
@@ -53,7 +54,7 @@ async function chatJson(model: string, system: string, payload: unknown): Promis
 }
 
 export async function diagnoseWithAi(item: QccCase, model: string): Promise<{ findings: ProcessFinding[]; hypotheses: CauseHypothesis[] }> {
-  const raw = await chatJson(model, `你是一名严谨的QCC流程诊断辅导员。只依据用户提供的事实诊断责任、交接、规则、控制、数据、异常闭环六类断点。不得把假设写成真因。每个finding的evidence必须引用具体流程步骤或缺失信息。
+  const raw = await chatJson(model, `你是一名严谨的QCC流程诊断辅导员。只依据用户提供的事实，从组织、端到端流程、IT、规则四个维度诊断现状。不得把假设写成真因。每个finding的evidence必须引用具体流程步骤、问题事实或缺失信息。
 
 只输出一个JSON对象，不得使用中文字段名，不得增加包装层。字段名、类型和枚举必须与下面完全一致，所有字段必填：
 {
@@ -61,6 +62,8 @@ export async function diagnoseWithAi(item: QccCase, model: string): Promise<{ fi
     "stepId": "必须原样使用输入流程步骤的id",
     "stepName": "必须原样使用对应流程步骤的name",
     "category": "责任|交接|规则|控制|数据|异常闭环",
+    "dimension": "组织|端到端流程|IT|规则",
+    "problemTag": "简短问题标签",
     "title": "断点结论",
     "evidence": "引用具体步骤事实或明确缺失信息",
     "impactMetric": "受影响指标",
@@ -81,12 +84,16 @@ export async function diagnoseWithAi(item: QccCase, model: string): Promise<{ fi
     "dueDate": "建议完成日期或空字符串"
   }]
 }
+
 只为高优先级断点生成原因假设，hypotheses最多12项。`, {
     problem: { title: item.title, type: item.problemType, object: item.object, location: item.location, period: item.period, frequency: item.frequency, impact: item.impact, metric: item.metric, baseline: item.baseline, target: item.target, dataDefinition: item.dataDefinition },
-    process: { start: item.processStart, end: item.processEnd, owner: item.processOwner, steps: item.steps.filter((step) => step.nodeType !== "END"), transitions: item.transitions },
+    process: { start: item.processStart, end: item.processEnd, owner: item.processOwner, steps: item.steps.filter((step) => step.nodeType !== "END"), transitions: item.transitions, facts: item.processFacts },
   });
   const parsed = diagnosisSchema.parse(raw);
-  const findings = parsed.findings.map((finding) => ({ ...finding, id: makeId("finding") }));
+  const findings = parsed.findings.map((finding) => {
+    const factIds = item.processFacts.filter((fact) => fact.anchorType === "NODE" && fact.anchorId === finding.stepId).map((fact) => fact.id);
+    return { ...finding, id: makeId("finding"), anchorType: "NODE" as const, anchorId: finding.stepId, factIds, evidenceLevel: factIds.length ? "结构与事实相互印证" as const : "仅流程结构" as const };
+  });
   const hypotheses = parsed.hypotheses.map((hypothesis) => ({
     id: makeId("cause"), findingId: findings[hypothesis.findingIndex]?.id || findings[0].id, stepName: hypothesis.stepName,
     kind: hypothesis.kind, statement: hypothesis.statement, rationale: hypothesis.rationale, verificationMethod: hypothesis.verificationMethod,
@@ -94,6 +101,11 @@ export async function diagnoseWithAi(item: QccCase, model: string): Promise<{ fi
     dueDate: hypothesis.dueDate, result: "", status: "待验证" as const,
   }));
   return { findings, hypotheses };
+}
+
+export async function extractMaterialProblemsWithAi(segments: MaterialSegment[], model: string): Promise<MaterialCandidate[]> {
+  const raw = await chatJson(model, `你是QCC现状调研材料分析助手。只从输入原文中提取可观察的问题事实，不补写原文没有的信息。按组织类、流程类、IT类、管理规则类分类，保留原文位置和短引用。只输出JSON：{"candidates":[{"description":"问题事实","problemCategory":"组织类|流程类|IT类|管理规则类","problemTag":"简短标签","sourceLocation":"原样使用输入位置","sourceQuote":"不超过100字原文","confidence":0到1}]}。最多30条。`, { segments });
+  return materialCandidatesSchema.parse(raw).candidates.map((candidate) => ({ ...candidate, anchorType: "GLOBAL" as const }));
 }
 
 export async function solutionsWithAi(item: QccCase, model: string): Promise<Countermeasure[]> {
@@ -124,6 +136,13 @@ export async function solutionsWithAi(item: QccCase, model: string): Promise<Cou
     ...measure, id: makeId("measure"),
     totalScore: Number(((measure.impact * 0.35 + (6 - measure.effort) * 0.25 + measure.speed * 0.25 + (6 - measure.riskScore) * 0.15)).toFixed(2)),
   }));
+}
+
+export async function toBeWithAi(item: QccCase, model: string): Promise<ToBeProcess> {
+  const supported = item.hypotheses.filter((cause) => cause.status === "证据支持");
+  const raw = await chatJson(model, `你是流程改进顾问。只能根据证据支持的原因设计TO BE流程。保留必要的原节点id，新节点id以tobe_开头。输出JSON，只包含steps、transitions、changes，字段必须完全符合输入中的结构。changes必须引用输入中的causeId。不得使用待验证原因。`, { asIs: { steps: item.steps, transitions: item.transitions }, supportedCauses: supported, countermeasures: item.countermeasures });
+  const parsed = toBeGenerationSchema.parse(raw);
+  return { ...parsed, source: "AI", reviewed: false, userEdited: false };
 }
 
 export const configuredModel = defaultModel || "built-in-rule-engine";

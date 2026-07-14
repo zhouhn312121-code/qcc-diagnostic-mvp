@@ -73,8 +73,8 @@ export function sampleCases(): QccCase[] {
     period: "2026年4–6月", frequency: spec.frequency, impact: spec.impact, metric: spec.metric, baseline: spec.baseline,
     target: spec.target, dataDefinition: spec.dataDefinition, processStart: spec.processStart, processEnd: spec.processEnd,
     processOwner: spec.processOwner, sanitizedConfirmed: true,
-    steps: spec.steps.map(([name, owner, input, activity, output, standard, anomaly], index) => ({ id: `${spec.id}_step_${index + 1}`, order: index + 1, name, owner, input, activity, output, standard, anomaly, nodeType: "ACTION" as const, routingMode: "AUTO_NEXT" as const, decisionTitle: "", decisionBasis: "" })),
-    transitions: [], version: 1,
+    steps: spec.steps.map(([name, owner, input, activity, output, standard, anomaly], index) => ({ id: `${spec.id}_step_${index + 1}`, order: index + 1, name, owner, input, activity, output, standard, anomaly, nodeType: "ACTION" as const, routingMode: "AUTO_NEXT" as const, decisionTitle: "", decisionBasis: "", positionX: 80 + index * 220, positionY: 120, lane: owner })),
+    transitions: [], processFacts: [], toBeProcess: null, asIsDrawio: null, toBeDrawio: null, diagnosisStale: false, version: 1,
     findings: [], hypotheses: [], countermeasures: [], stage: 1, status: "待诊断", createdAt: now, updatedAt: now,
   })));
 }

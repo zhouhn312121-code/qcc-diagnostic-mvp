@@ -3,15 +3,17 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, BookOpenCheck, CheckCircle2, Clipboard, Download, FileSearch, GitBranch, Lightbulb, Plus, Printer, Save, ShieldAlert, Sparkles, Trash2, X, ZoomIn, ZoomOut } from "lucide-react";
+import { AlertTriangle, ArrowLeft, BookOpenCheck, CheckCircle2, Clipboard, Download, FileSearch, GitBranch, Lightbulb, Plus, Printer, Save, ShieldAlert, Sparkles, Trash2, X, ZoomIn, ZoomOut } from "lucide-react";
 import { caseProgress, emptyStep, hasProcessLoop, processIssues, readinessIssues, syncAutoTransitions } from "@/lib/case-utils";
 import { makeId } from "@/lib/ids";
-import { problemTypes, type CauseHypothesis, type Countermeasure, type ProcessFinding, type ProcessStep, type ProcessTransition, type QccCase } from "@/lib/types";
+import { problemCategories, problemTypes, type CauseHypothesis, type Countermeasure, type ProcessFinding, type ProcessStep, type ProcessTransition, type QccCase } from "@/lib/types";
 import type { ModelOption } from "@/lib/ai";
+import { GuidedFactsPanel, ProcessCanvas, ToBeWorkbench, UploadSimulator } from "@/components/ProcessWorkbench";
+import { DrawioWorkbench } from "@/components/DrawioWorkbench";
 
 const stages = [
   { id: 1, label: "问题与流程", icon: GitBranch },
-  { id: 2, label: "断点诊断", icon: FileSearch },
+  { id: 2, label: "现状诊断", icon: FileSearch },
   { id: 3, label: "根因验证", icon: ShieldAlert },
   { id: 4, label: "改善方案", icon: Lightbulb },
   { id: 5, label: "报告导出", icon: BookOpenCheck },
@@ -41,7 +43,7 @@ export function CaseWorkspace({ initialCase, modelOptions }: { initialCase: QccC
   const [saving, setSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"saved" | "dirty" | "saving" | "retrying" | "failed">("saved");
   const [draft, setDraft] = useState<QccCase | null>(null);
-  const [running, setRunning] = useState<"diagnose" | "solutions" | null>(null);
+  const [running, setRunning] = useState<"diagnose" | "solutions" | "tobe" | null>(null);
   const [toast, setToast] = useState("");
   const router = useRouter();
   const itemRef = useRef(item);
@@ -143,9 +145,17 @@ export function CaseWorkspace({ initialCase, modelOptions }: { initialCase: QccC
     } catch (error) { notify(error instanceof Error ? error.message : "方案生成失败"); }
     finally { setRunning(null); }
   }
+  async function generateToBe(mode: "COPY" | "AI", replace = false) {
+    const supported = item.hypotheses.filter((h) => h.status === "证据支持");
+    if (!supported.length) { notify("请先完成至少一个原因验证"); return; }
+    if (item.toBeProcess?.userEdited && replace && !window.confirm("当前TO BE流程已有人工修改。重新生成将覆盖现有草案，是否继续？")) return;
+    const saved = await save(true); if (!saved) return; setRunning("tobe");
+    try { const response = await fetch("/api/tobe", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ caseId: item.id, mode, replace }) }); const data = await response.json(); if (!response.ok) throw new Error(data.error || "TO BE生成失败"); setItem(data.case); setDirty(false); setActiveStage(4); notify(mode === "COPY" ? "已复制AS IS，可开始编辑TO BE" : "TO BE草案已生成"); }
+    catch (error) { notify(error instanceof Error ? error.message : "TO BE生成失败"); } finally { setRunning(null); }
+  }
 
   function updateStep(index: number, key: keyof QccCase["steps"][number], value: ProcessStep[keyof ProcessStep]) {
-    const steps = [...item.steps]; steps[index] = { ...steps[index], [key]: value }; update({ ...item, steps });
+    const steps = [...item.steps]; steps[index] = { ...steps[index], [key]: value }; update({ ...item, steps, asIsDrawio: item.asIsDrawio ? { ...item.asIsDrawio, syncStatus: "STALE" } : null, toBeDrawio: item.toBeDrawio ? { ...item.toBeDrawio, syncStatus: "STALE" } : null, diagnosisStale: item.findings.length > 0 });
   }
   function updateFinding(index: number, patch: Partial<ProcessFinding>) {
     const findings = [...item.findings]; findings[index] = { ...findings[index], ...patch, userEdited: true }; update({ ...item, findings });
@@ -163,14 +173,22 @@ export function CaseWorkspace({ initialCase, modelOptions }: { initialCase: QccC
   }
   async function copyA3() {
     const supported = item.hypotheses.filter((h) => h.status === "证据支持");
+    const categorySummary = problemCategories.map((category) => `${category}${item.processFacts.filter((fact) => fact.problemCategory === category).length}项`).join("、");
     const text = [
-      `【课题】${item.title}`, `【问题事实】${item.object}在${item.location}，${item.period}发生${item.frequency}。影响：${item.impact}`,
-      `【核心指标】${item.metric}：基线${item.baseline}，目标${item.target}。口径：${item.dataDefinition}`,
-      `【流程边界】${item.processStart} → ${item.processEnd}`, `【主要流程断点】\n${item.findings.filter((f) => f.priority === "高").map((f, i) => `${i + 1}. ${f.stepName}｜${f.category}｜${f.title}`).join("\n") || "待完成诊断"}`,
-      `【证据支持原因】\n${supported.map((h, i) => `${i + 1}. ${h.statement}；证据：${h.result}`).join("\n") || "尚无"}`,
-      `【候选对策】\n${item.countermeasures.sort((a,b) => b.totalScore-a.totalScore).slice(0,6).map((m,i) => `${i+1}. [${m.type}] ${m.action}`).join("\n") || "待生成"}`,
+      `【课题】${item.title}`,
+      `【一、问题与流程】${item.metric}：基线${item.baseline}，目标${item.target}；口径：${item.dataDefinition}。流程边界：${item.processStart} → ${item.processEnd}。`,
+      `【二、现状诊断】共${item.processFacts.length}项问题，${categorySummary}。\n${item.findings.filter((f) => f.priority === "高").map((f, i) => `${i + 1}. ${f.dimension}｜${f.title}`).join("\n") || "待完成诊断"}`,
+      `【三、根因验证】${supported.length}项原因获得证据支持。\n${supported.map((h, i) => `${i + 1}. ${h.statement}；证据：${h.result}`).join("\n") || "尚无"}`,
+      `【四、改善方案】\nTO BE变更：${item.toBeProcess?.changes.map((c) => `[${c.changeType}]${c.description}`).join("；") || "尚未设计"}\n详细措施：${item.countermeasures.sort((a,b) => b.totalScore-a.totalScore).slice(0,6).map((m,i) => `${i+1}. [${m.type}] ${m.action}`).join("\n") || "待生成"}`,
+      `【流程图来源】AS IS：${item.asIsDrawio ? `draw.io（${item.asIsDrawio.syncStatus}）` : "智能流程搭建"}；TO BE：${item.toBeDrawio ? `draw.io（${item.toBeDrawio.syncStatus}）` : item.toBeProcess ? "智能流程搭建" : "尚未设计"}${item.diagnosisStale ? "；AS IS已变化，需重新诊断" : ""}`,
     ].join("\n\n");
-    await navigator.clipboard.writeText(text); notify("A3结构化文本已复制");
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
+      await navigator.clipboard.writeText(text); notify("A3结构化文本已复制");
+    } catch {
+      window.prompt("浏览器未允许自动复制，请在下方全选并复制A3文本：", text);
+      notify("未获得剪贴板权限，已打开手工复制窗口");
+    }
   }
 
   return (
@@ -200,7 +218,7 @@ export function CaseWorkspace({ initialCase, modelOptions }: { initialCase: QccC
           {activeStage === 1 && <ProblemStage item={item} updateField={updateField} update={update} updateStep={updateStep} runDiagnosis={runDiagnosis} issues={issues} running={running} modelOptions={modelOptions} />}
           {activeStage === 2 && <DiagnosisStage item={item} issues={issues} runDiagnosis={runDiagnosis} running={running} updateFinding={updateFinding} goNext={() => setActiveStage(3)} />}
           {activeStage === 3 && <VerificationStage item={item} updateCause={updateCause} generateSolutions={generateSolutions} running={running} />}
-          {activeStage === 4 && <SolutionStage item={item} updateMeasure={updateMeasure} generateSolutions={generateSolutions} running={running} goNext={() => setActiveStage(5)} />}
+          {activeStage === 4 && <ImprovementStage item={item} update={update} updateMeasure={updateMeasure} generateSolutions={generateSolutions} generateToBe={generateToBe} running={running} goNext={() => setActiveStage(5)} />}
           {activeStage === 5 && <ReportStage item={item} copyA3={copyA3} />}
         </div>
       </main>
@@ -211,41 +229,30 @@ export function CaseWorkspace({ initialCase, modelOptions }: { initialCase: QccC
 }
 
 function ProblemStage({ item, updateField, update, updateStep, runDiagnosis, issues, running, modelOptions }: { item: QccCase; updateField: <K extends keyof QccCase>(key: K, value: QccCase[K]) => void; update: (item: QccCase) => void; updateStep: (index: number, key: keyof QccCase["steps"][number], value: ProcessStep[keyof ProcessStep]) => void; runDiagnosis: () => void; issues: string[]; running: string | null; modelOptions: ModelOption[] }) {
-  const [flowTab, setFlowTab] = useState<"table" | "diagram">("table");
-  const [editingStepId, setEditingStepId] = useState<string | null>(null);
+  const [section, setSection] = useState<"problem" | "asis" | "facts">("problem");
+  const [flowTab, setFlowTab] = useState<"smart" | "drawio" | "table" | "upload">("smart");
   const defaultModel = modelOptions.find((option) => option.id !== "rules")?.id || "rules";
   const selectedModel = item.diagnosisModel || defaultModel;
   const selectedModelOption = modelOptions.find((option) => option.id === selectedModel) || modelOptions[0];
-  function commit(next: QccCase) { update(syncAutoTransitions({ ...next, steps: next.steps.map((step, index) => ({ ...step, order: index + 1 })) })); }
-  function changeNodeType(index: number, nodeType: ProcessStep["nodeType"]) {
-    const steps = [...item.steps]; const step = steps[index];
-    steps[index] = { ...step, nodeType, routingMode: nodeType === "ACTION" ? "AUTO_NEXT" : "SPECIFIED" };
-    let transitions = item.transitions.filter((transition) => transition.sourceNodeId !== step.id);
-    if (nodeType === "DECISION") {
-      const target = steps[index + 1]?.id || steps.find((candidate) => candidate.nodeType === "END")?.id;
-      if (target) transitions = [
-        ...transitions,
-        { id: makeId("transition"), sourceNodeId: step.id, targetNodeId: target, transitionType: "CONDITION", branchName: "是", conditionExpression: "", isDefault: false, order: 1 },
-        { id: makeId("transition"), sourceNodeId: step.id, targetNodeId: target, transitionType: "CONDITION", branchName: "否", conditionExpression: "", isDefault: true, order: 2 },
-      ];
-      setEditingStepId(step.id);
-    }
-    commit({ ...item, steps, transitions });
-  }
-  function addStep() {
-    if (item.steps.length >= 20) return;
-    const endIndex = item.steps.findIndex((step) => step.nodeType === "END");
-    const insertAt = endIndex < 0 ? item.steps.length : endIndex;
-    const steps = [...item.steps]; steps.splice(insertAt, 0, emptyStep(insertAt + 1)); commit({ ...item, steps });
-  }
-  function deleteStep(step: ProcessStep) {
-    const incoming = item.transitions.filter((transition) => transition.targetNodeId === step.id);
-    if (incoming.length) { window.alert(`该步骤正被${incoming.length}条流转引用，请先修改相关流转。`); return; }
-    commit({ ...item, steps: item.steps.filter((candidate) => candidate.id !== step.id), transitions: item.transitions.filter((transition) => transition.sourceNodeId !== step.id) });
+  function commit(next: QccCase) { const stepIds = new Set(next.steps.map((step) => step.id)); const transitionIds = new Set(next.transitions.map((transition) => transition.id)); update({ ...next, steps: next.steps.map((step, index) => ({ ...step, order: index + 1 })), processFacts: next.processFacts.filter((fact) => fact.anchorType === "GLOBAL" || fact.anchorType === "NODE" && stepIds.has(fact.anchorId) || fact.anchorType === "EDGE" && transitionIds.has(fact.anchorId)), asIsDrawio: next.asIsDrawio ? { ...next.asIsDrawio, syncStatus: "STALE" } : null, toBeDrawio: next.toBeDrawio ? { ...next.toBeDrawio, syncStatus: "STALE" } : null, diagnosisStale: next.findings.length > 0 }); }
+  function applyTemplate(kind: "order" | "quality" | "purchase" | "production" | "customer" | "blank") {
+    if (!window.confirm("应用模板将替换当前AS IS节点与连线，是否继续？")) return;
+    const templates = {
+      order: [["流程开始", "", "START"], ["接收订单", "销售专员", "ACTION"], ["跨部门评审", "评审负责人", "ACTION"], ["排产与交付", "计划主管", "ACTION"], ["反馈结果", "客服专员", "ACTION"], ["流程结束", "", "END"]],
+      quality: [["流程开始", "", "START"], ["发现异常", "现场人员", "ACTION"], ["隔离与上报", "班组长", "ACTION"], ["原因分析", "质量工程师", "ACTION"], ["验证关闭", "流程负责人", "ACTION"], ["流程结束", "", "END"]],
+      purchase: [["流程开始", "", "START"], ["提出采购需求", "需求部门", "ACTION"], ["询价与评审", "采购专员", "ACTION"], ["供应商交付", "供应商管理员", "ACTION"], ["验收入库", "仓储专员", "ACTION"], ["流程结束", "", "END"]],
+      production: [["流程开始", "", "START"], ["发现生产异常", "操作员", "ACTION"], ["临时处置", "班组长", "ACTION"], ["升级与决策", "生产经理", "ACTION"], ["验证与复盘", "工艺工程师", "ACTION"], ["流程结束", "", "END"]],
+      customer: [["流程开始", "", "START"], ["受理客诉", "客服专员", "ACTION"], ["调查分析", "质量工程师", "ACTION"], ["制定对策", "责任部门", "ACTION"], ["客户反馈与关闭", "客服经理", "ACTION"], ["流程结束", "", "END"]],
+      blank: [["流程开始", "", "START"], ["新步骤", "", "ACTION"], ["流程结束", "", "END"]],
+    } as const;
+    const specs = templates[kind];
+    const steps = specs.map(([name, owner, nodeType], index) => ({ ...emptyStep(index + 1), id: makeId("step"), name, owner, lane: owner, nodeType, routingMode: "SPECIFIED" as const, input: nodeType === "ACTION" ? "上一步输出" : "", activity: nodeType === "ACTION" ? name : "", output: nodeType === "ACTION" ? `${name}结果` : "", standard: nodeType === "ACTION" ? "按规定时限完成" : "", positionX: 80 + index * 200, positionY: 120 }));
+    const transitions = steps.slice(0, -1).map((step, index) => ({ id: makeId("transition"), sourceNodeId: step.id, targetNodeId: steps[index + 1].id, transitionType: "DEFAULT" as const, branchName: "", conditionExpression: "", isDefault: true, order: 1 }));
+    commit({ ...item, steps, transitions, processFacts: [] });
   }
   return <>
-    <div className="step-intro"><div><h2>定义问题与流程</h2><p>先把问题讲清楚，再让系统检查流程。缺少量化事实时，诊断不会启动。</p></div></div>
-    <section className="panel">
+    <div className="foundation-tabs"><button className={section === "problem" ? "active" : ""} onClick={() => setSection("problem")}>1. 流程界定</button><button className={section === "asis" ? "active" : ""} onClick={() => setSection("asis")}>2. AS IS还原</button><button className={section === "facts" ? "active" : ""} onClick={() => setSection("facts")}>3. 流程问题分析</button></div>
+    {section === "problem" && <><div className="step-intro"><div><h2>流程界定</h2><p>先统一课题、流程边界与指标口径，再还原当下真实流程。</p></div></div><section className="panel">
       <div className="panel-title"><div><h3>课题与问题事实</h3><p>建议使用“对象 + 地点 + 时间 + 现象 + 差距 + 影响”的表达。</p></div></div>
       <div className="form-grid">
         <Field label="课题名称" value={item.title} onChange={(v) => updateField("title", v)} placeholder="例如：降低换线首件不良率" />
@@ -256,8 +263,7 @@ function ProblemStage({ item, updateField, update, updateStep, runDiagnosis, iss
         <Field label="频次或差距" value={item.frequency} onChange={(v) => updateField("frequency", v)} placeholder="例如：每周12次，当前8.6%" />
         <Field label="经营影响" value={item.impact} onChange={(v) => updateField("impact", v)} placeholder="返工、停线、延期、资金或客户影响" full textarea />
       </div>
-    </section>
-    <section className="panel">
+    </section><section className="panel">
       <div className="panel-title"><div><h3>指标与流程边界</h3><p>改善前后必须使用同一统计口径。</p></div></div>
       <div className="form-grid three">
         <Field label="核心指标" value={item.metric} onChange={(v) => updateField("metric", v)} placeholder="首件不良率" />
@@ -268,26 +274,13 @@ function ProblemStage({ item, updateField, update, updateStep, runDiagnosis, iss
         <Field label="流程终点" value={item.processEnd} onChange={(v) => updateField("processEnd", v)} />
         <Field label="流程责任人" value={item.processOwner} onChange={(v) => updateField("processOwner", v)} />
       </div>
-    </section>
-    <section className="panel">
-      <div className="panel-title"><div><h3>AS IS关键流程步骤</h3><p>填写实际做法；判断节点可配置条件分支和回流。最多20个节点。</p></div><button className="btn ghost" disabled={item.steps.length >= 20} onClick={addStep}><Plus size={15}/>增加步骤</button></div>
-      <div className="flow-tabs"><button className={flowTab === "table" ? "active" : ""} onClick={() => setFlowTab("table")}>步骤信息录入</button><button className={flowTab === "diagram" ? "active" : ""} onClick={() => setFlowTab("diagram")}>流程图预览</button></div>
-      {flowTab === "table" ? <div style={{ overflowX: "auto" }}><table className="step-table"><thead><tr><th className="narrow">#</th><th>步骤</th><th>节点类型</th><th>主责</th><th>输入</th><th>实际活动</th><th>输出</th><th>标准/时限</th><th>异常事实</th><th>流转关系</th><th></th></tr></thead><tbody>
-        {item.steps.map((step, index) => <tr key={step.id} className={step.nodeType === "END" ? "end-row" : ""}><td className="narrow"><div className="order-tools"><span>{index + 1}</span><button disabled={index === 0} onClick={() => { const steps = [...item.steps]; [steps[index - 1], steps[index]] = [steps[index], steps[index - 1]]; commit({ ...item, steps }); }}>↑</button><button disabled={index === item.steps.length - 1} onClick={() => { const steps = [...item.steps]; [steps[index + 1], steps[index]] = [steps[index], steps[index + 1]]; commit({ ...item, steps }); }}>↓</button></div></td>
-          <td><input value={step.name} onChange={(e) => updateStep(index, "name", e.target.value)} /></td>
-          <td><select value={step.nodeType} onChange={(e) => changeNodeType(index, e.target.value as ProcessStep["nodeType"])}><option value="ACTION">普通步骤</option><option value="DECISION">判断节点</option><option value="END">结束节点</option></select></td>
-          {(["owner","input","activity","output","standard","anomaly"] as const).map((key) => <td key={key}><input disabled={step.nodeType === "END" && !["output","anomaly"].includes(key)} value={step[key]} onChange={(e) => updateStep(index, key, e.target.value)} placeholder={key === "activity" ? "实际怎么做" : ""}/></td>)}
-          <td><button className="route-summary" disabled={step.nodeType === "END"} onClick={() => setEditingStepId(step.id)}>{transitionSummary(item, step)}</button></td>
-          <td><button aria-label="删除步骤" className="icon-btn" disabled={item.steps.length <= 2} onClick={() => deleteStep(step)}><Trash2 size={14}/></button></td></tr>)}
-      </tbody></table></div> : <FlowDiagram item={item} />}
-      {processIssues(item).length > 0 && <div className="flow-warnings">{processIssues(item).map((issue) => <span key={issue}>⚠ {issue}</span>)}</div>}
-      {hasProcessLoop(item) && <div className="flow-warnings"><span>↩ 检测到流程回流，请确认该循环符合实际业务。</span></div>}
-    </section>
-    {editingStepId && <TransitionDrawer item={item} stepId={editingStepId} update={commit} close={() => setEditingStepId(null)} />}
-    <div className={`callout ${issues.length ? "warn" : "success"}`}><ShieldAlert size={19}/><div><strong>{issues.length ? `诊断前还需补充${issues.length}项` : "信息完整，可以开始诊断"}</strong>{issues.length > 0 && <ul className="issues">{issues.map((x) => <li key={x}>{x}</li>)}</ul>}</div></div>
+    </section><button className="btn primary" onClick={() => setSection("asis")}>下一步：还原AS IS流程</button></>}
+    {section === "asis" && <><div className="step-intro"><div><h2>AS IS流程还原</h2><p>普通流程使用智能搭建，复杂流程可切换到draw.io自由绘制。</p></div></div><section className="panel"><div className="flow-tabs"><button className={flowTab === "smart" ? "active" : ""} onClick={() => setFlowTab("smart")}>智能流程搭建</button><button className={flowTab === "drawio" ? "active" : ""} onClick={() => setFlowTab("drawio")}>draw.io自由绘制</button><button className={flowTab === "table" ? "active" : ""} onClick={() => setFlowTab("table")}>流程明细</button><button className={flowTab === "upload" ? "active" : ""} onClick={() => setFlowTab("upload")}>上传流程图</button></div>{flowTab === "smart" && <><div className="template-bar"><strong>流程模板</strong><button onClick={() => applyTemplate("order")}>订单履约</button><button onClick={() => applyTemplate("quality")}>质量异常</button><button onClick={() => applyTemplate("purchase")}>采购供应商</button><button onClick={() => applyTemplate("production")}>生产异常</button><button onClick={() => applyTemplate("customer")}>客诉处理</button><button onClick={() => applyTemplate("blank")}>空白流程</button><span>应用模板会替换当前流程并清空已有事实。</span></div><ProcessCanvas steps={item.steps} transitions={item.transitions} facts={item.processFacts} onChange={(steps, transitions) => commit({ ...item, steps, transitions })}/></>} {flowTab === "drawio" && <DrawioWorkbench item={item} stage="AS_IS" update={update}/>} {flowTab === "upload" && <UploadSimulator onUseCurrent={() => setFlowTab("smart")} onApply={(steps, transitions) => { if ((item.processFacts.length > 0 || item.findings.length > 0) && !window.confirm(`当前课题已有${item.processFacts.length}条流程问题事实和${item.findings.length}条诊断结论。应用新流程会清除旧事实，并将既有诊断标记为需要重新诊断，是否继续？`)) return; commit({ ...item, steps, transitions, processFacts: [] }); setFlowTab("smart"); }}/>} {flowTab === "table" && <div style={{ overflowX: "auto" }}><table className="step-table"><thead><tr><th>#</th><th>步骤</th><th>节点类型</th><th>主责</th><th>输入</th><th>实际活动</th><th>输出</th><th>标准/时限</th></tr></thead><tbody>{item.steps.map((step, index) => <tr key={step.id}><td>{index + 1}</td><td><input value={step.name} onChange={(event) => updateStep(index, "name", event.target.value)}/></td><td>{step.nodeType === "START" ? "开始" : step.nodeType === "DECISION" ? "判断" : step.nodeType === "END" ? "结束" : "步骤"}</td>{(["owner", "input", "activity", "output", "standard"] as const).map((key) => <td key={key}><input disabled={step.nodeType === "START" || step.nodeType === "END"} value={step[key]} onChange={(event) => updateStep(index, key, event.target.value)}/></td>)}</tr>)}</tbody></table></div>}</section>{processIssues(item).length > 0 && <div className="flow-warnings">{processIssues(item).map((issue, index) => <span key={`${index}-${issue}`}>⚠ {issue}</span>)}</div>}<button className="btn primary" onClick={() => setSection("facts")}>下一步：标注异常事实</button></>}
+    {section === "facts" && <><div className="step-intro"><div><h2>流程问题分析</h2><p>支持人工添加，也可从Word、Excel和PDF材料中提取候选问题；分类与流程定位分别记录。</p></div></div><section className="panel"><GuidedFactsPanel item={item} update={update}/></section></>}
+    <div className={`callout ${issues.length ? "warn" : "success"}`}><ShieldAlert size={19}/><div><strong>{issues.length ? `诊断前还需补充${issues.length}项` : "信息完整，可以开始诊断"}</strong>{issues.length > 0 && <ul className="issues">{issues.map((x, index) => <li key={`${index}-${x}`}>{x}</li>)}</ul>}</div></div>
     <label className="callout info" style={{ cursor: "pointer" }}><input type="checkbox" checked={item.sanitizedConfirmed} onChange={(e) => updateField("sanitizedConfirmed", e.target.checked)} /><div><strong>我确认资料已经脱敏</strong><br/>不包含客户名称、人员姓名、合同编号或其他敏感数据。</div></label>
     <div className="model-picker"><div><label htmlFor="diagnosis-model">诊断模型</label><p>{selectedModelOption?.description}</p></div><select id="diagnosis-model" value={selectedModel} onChange={(event) => updateField("diagnosisModel", event.target.value)} disabled={running === "diagnose"}>{modelOptions.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select></div>
-    <button className="btn blue" disabled={issues.length > 0 || running === "diagnose"} onClick={runDiagnosis}>{running === "diagnose" ? <span className="spinner"/> : <Sparkles size={17}/>}开始流程断点诊断</button>
+    <button className="btn blue" disabled={issues.length > 0 || running === "diagnose"} onClick={runDiagnosis}>{running === "diagnose" ? <span className="spinner"/> : <Sparkles size={17}/>}开始现状诊断</button>
   </>;
 }
 
@@ -351,10 +344,17 @@ function FlowDiagram({ item }: { item: QccCase }) {
 }
 
 function DiagnosisStage({ item, issues, runDiagnosis, running, updateFinding, goNext }: { item: QccCase; issues: string[]; runDiagnosis: () => void; running: string | null; updateFinding: (index: number, patch: Partial<ProcessFinding>) => void; goNext: () => void }) {
-  return <><div className="step-intro"><div><h2>流程断点诊断</h2><p>按照责任、交接、规则、控制、数据和异常闭环六类机制扫描。</p></div>{item.engine && <span className="badge blue">{item.engine}</span>}</div>
+  const [scope, setScope] = useState<"总览" | "组织" | "端到端流程" | "IT" | "规则">("总览");
+  const visibleFindings = scope === "总览" ? item.findings : item.findings.filter((finding) => finding.dimension === scope);
+  const dimensionLabel = (dimension: "总览" | "组织" | "端到端流程" | "IT" | "规则") => dimension === "规则" ? "管理规则" : dimension;
+  return <><div className="step-intro"><div><h2>现状诊断</h2><p>围绕组织、端到端流程、IT、规则四个维度识别问题，并追溯到流程位置与事实。</p></div>{item.engine && <span className="badge blue">{item.engine}</span>}</div>
+    <div className="diagnosis-inputs"><div className="diagnosis-input-card"><h4>AS IS流程结构</h4><p>{item.steps.length}个节点、{item.transitions.length}条连线；分析责任、输入输出、判断分支、交接、回流、标准与控制点。</p></div><div className="diagnosis-plus">＋</div><div className="diagnosis-input-card"><h4>流程问题分析</h4><p>{item.processFacts.length}项问题事实；分析组织、流程、IT、管理规则分类以及频次、影响、证据和关联位置。</p></div></div>
+    {item.diagnosisStale && <div className="callout warn"><AlertTriangle size={18}/><div><strong>AS IS流程已变化，需要重新诊断</strong><br/>旧断点和原因暂时保留用于对照，重新诊断前不应作为当前流程结论。<div style={{ marginTop: 10 }}><button className="btn blue" disabled={issues.length > 0 || running === "diagnose"} onClick={runDiagnosis}>{running === "diagnose" ? <span className="spinner"/> : <Sparkles size={15}/>}重新诊断当前流程</button></div></div></div>}
     {!item.findings.length ? <div className="panel empty"><div className="empty-icon"><FileSearch/></div><h3>尚未形成诊断结果</h3><p>{issues.length ? "请先返回补充问题和流程信息。" : "信息已就绪，可以开始诊断。"}</p><button className="btn blue" disabled={issues.length > 0 || running === "diagnose"} onClick={runDiagnosis}>{running ? <span className="spinner"/> : <Sparkles size={16}/>}生成诊断</button></div> : <>
-      <div className="callout info"><ShieldAlert size={18}/><div><strong>断点是待验证的诊断判断</strong><br/>每一项都引用了流程步骤或缺失信息。你可以直接修改，修改后的内容不会被后续生成覆盖。</div></div>
-      <div className="finding-list">{item.findings.map((finding, index) => <article className="finding-card" key={finding.id}><div className="finding-head"><div><h4>{finding.stepName}｜{finding.title}</h4><div className="meta-line"><span className="badge blue">{finding.category}</span><span className={`badge ${badgeClass(finding.priority)}`}>{finding.priority}优先</span><span>信息完整度 {finding.completeness}%</span>{finding.userEdited && <span>已人工修改</span>}</div></div><select className="status-select" value={finding.priority} onChange={(e) => updateFinding(index, { priority: e.target.value as ProcessFinding["priority"] })}><option>高</option><option>中</option><option>低</option></select></div><div className="evidence">依据：{finding.evidence}</div><div className="card-grid"><Field label="诊断结论" value={finding.title} onChange={(v) => updateFinding(index, { title: v })}/><Field label="需要进一步确认" value={finding.question} onChange={(v) => updateFinding(index, { question: v })}/></div></article>)}</div>
+      <div className="diagnosis-summary">{(["组织", "端到端流程", "IT", "规则"] as const).map((dimension) => <button key={dimension} onClick={() => setScope(dimension)}><strong>{item.findings.filter((finding) => finding.dimension === dimension).length}</strong><span>{dimensionLabel(dimension)}</span><small>{item.findings.filter((finding) => finding.dimension === dimension && finding.priority === "高").length}项高优先</small></button>)}</div>
+      <div className="callout info"><ShieldAlert size={18}/><div><strong>诊断结论仍是待验证判断</strong><br/>每一项引用流程步骤、缺失字段或问题事实；进入根因验证后才判断是否成立。</div></div>
+      <div className="result-filter">{(["总览", "组织", "端到端流程", "IT", "规则"] as const).map((dimension) => <button key={dimension} className={scope === dimension ? "active" : ""} onClick={() => setScope(dimension)}>{dimensionLabel(dimension)}（{dimension === "总览" ? item.findings.length : item.findings.filter((finding) => finding.dimension === dimension).length}）</button>)}</div>
+      <div className="finding-list">{visibleFindings.map((finding) => { const index = item.findings.findIndex((value) => value.id === finding.id); const evidenceLevel = finding.evidenceLevel || (finding.factIds?.length ? "事实支持" : "仅流程结构"); return <article className="finding-card" key={finding.id}><div className="finding-head"><div><h4>{finding.stepName}｜{finding.title}</h4><div className="meta-line"><span className="badge blue">{finding.dimension === "规则" ? "管理规则" : finding.dimension}</span><span className="badge gray">{finding.problemTag || finding.category}</span><span className={`badge ${badgeClass(finding.priority)}`}>{finding.priority}优先</span><span>{finding.anchorType === "EDGE" ? "交接定位" : finding.anchorType === "GLOBAL" ? "全流程定位" : "节点定位"}</span><span className={`badge ${evidenceLevel === "待补证" || evidenceLevel === "仅流程结构" ? "gray" : "green"}`}>{evidenceLevel}</span><span>信息完整度 {finding.completeness}%</span>{finding.userEdited && <span>已人工修改</span>}</div></div><select className="status-select" value={finding.priority} onChange={(e) => updateFinding(index, { priority: e.target.value as ProcessFinding["priority"] })}><option>高</option><option>中</option><option>低</option></select></div><div className="evidence">依据：{finding.evidence}</div><div className="card-grid"><Field label="诊断结论" value={finding.title} onChange={(v) => updateFinding(index, { title: v })}/><Field label="需要进一步确认" value={finding.question} onChange={(v) => updateFinding(index, { question: v })}/></div></article>; })}</div>
       <div style={{ marginTop: 20, display: "flex", gap: 10 }}><button className="btn ghost" onClick={runDiagnosis} disabled={running === "diagnose"}><Sparkles size={16}/>补充诊断</button><button className="btn primary" onClick={goNext}>进入根因验证</button></div>
     </>}
   </>;
@@ -362,13 +362,25 @@ function DiagnosisStage({ item, issues, runDiagnosis, running, updateFinding, go
 
 function VerificationStage({ item, updateCause, generateSolutions, running }: { item: QccCase; updateCause: (index: number, patch: Partial<CauseHypothesis>) => void; generateSolutions: () => void; running: string | null }) {
   const supported = item.hypotheses.filter((h) => h.status === "证据支持").length;
+  const [filter, setFilter] = useState<"全部" | CauseHypothesis["status"]>("全部");
+  const visible = filter === "全部" ? item.hypotheses : item.hypotheses.filter((cause) => cause.status === filter);
+  const groups = [...new Set(visible.map((cause) => cause.stepName))];
   return <><div className="step-intro"><div><h2>原因假设与验证</h2><p>鱼骨图和AI只能提出假设；现场数据、观察或试验才有资格支持真因。</p></div><span className="badge green">{supported} 个证据支持</span></div>
     {!item.hypotheses.length ? <div className="panel empty"><div className="empty-icon"><ShieldAlert/></div><h3>请先完成流程断点诊断</h3></div> : <>
       <div className="callout warn"><ShieldAlert size={18}/><div><strong>验证纪律</strong><br/>必须先填写验证结果，才能选择“证据支持”。证据不足的原因不会进入方案生成。</div></div>
-      <div className="cause-list">{item.hypotheses.map((cause, index) => <article className="cause-card" key={cause.id}><div className="cause-head"><div><h4>{cause.statement}</h4><div className="meta-line"><span className={`badge ${cause.kind === "机制原因" ? "blue" : "gray"}`}>{cause.kind}</span><span>{cause.stepName}</span><span>{cause.verificationMethod}</span>{cause.userEdited && <span>已人工修改</span>}</div></div><select className={`status-select ${cause.status === "证据支持" ? "supported" : cause.status === "证据不支持" ? "rejected" : "pending"}`} value={cause.status} onChange={(e) => updateCause(index, { status: e.target.value as CauseHypothesis["status"] })}><option>待验证</option><option>证据支持</option><option>证据不支持</option><option>证据不足</option></select></div><div className="evidence">提出依据：{cause.rationale}</div><div className="card-grid"><Field label="所需数据/样本" value={cause.dataNeeded} onChange={(v) => updateCause(index, { dataNeeded: v })} textarea/><Field label="成立/不成立标准" value={cause.decisionRule} onChange={(v) => updateCause(index, { decisionRule: v })} textarea/><Field label="责任人" value={cause.owner} onChange={(v) => updateCause(index, { owner: v })}/><Field label="完成日期" value={cause.dueDate} onChange={(v) => updateCause(index, { dueDate: v })} placeholder="YYYY-MM-DD"/><Field label="验证结果与证据" value={cause.result} onChange={(v) => updateCause(index, { result: v })} placeholder="填写数据结果、现场记录或试验结论" full textarea/></div></article>)}</div>
+      <div className="verification-progress"><strong>验证进度</strong><span>{item.hypotheses.filter((cause) => cause.status !== "待验证").length}/{item.hypotheses.length} 已判定</span><progress max={item.hypotheses.length} value={item.hypotheses.filter((cause) => cause.status !== "待验证").length}/></div>
+      <div className="result-filter">{(["全部", "待验证", "证据支持", "证据不足", "证据不支持"] as const).map((status) => <button key={status} className={filter === status ? "active" : ""} onClick={() => setFilter(status)}>{status}（{status === "全部" ? item.hypotheses.length : item.hypotheses.filter((cause) => cause.status === status).length}）</button>)}</div>
+      <div className="cause-groups">{groups.map((stepName) => <details key={stepName} open={filter !== "全部" || visible.filter((cause) => cause.stepName === stepName).some((cause) => cause.status === "证据支持")}><summary><strong>{stepName}</strong><span>{visible.filter((cause) => cause.stepName === stepName).length}个原因假设</span></summary><div className="cause-list">{visible.filter((cause) => cause.stepName === stepName).map((cause) => { const index = item.hypotheses.findIndex((value) => value.id === cause.id); const overdue = Boolean(cause.dueDate && cause.status === "待验证" && new Date(`${cause.dueDate}T23:59:59`).getTime() < Date.now()); return <article className="cause-card" key={cause.id}><div className="cause-head"><div><h4>{cause.statement}</h4><div className="meta-line"><span className={`badge ${cause.kind === "机制原因" ? "blue" : "gray"}`}>{cause.kind}</span><span>{cause.verificationMethod}</span>{overdue && <span className="badge red">已逾期</span>}{cause.userEdited && <span>已人工修改</span>}</div></div><select className={`status-select ${cause.status === "证据支持" ? "supported" : cause.status === "证据不支持" ? "rejected" : "pending"}`} value={cause.status} onChange={(e) => updateCause(index, { status: e.target.value as CauseHypothesis["status"] })}><option>待验证</option><option>证据支持</option><option>证据不支持</option><option>证据不足</option></select></div><div className="evidence">提出依据：{cause.rationale}</div><div className="card-grid"><Field label="所需数据/样本" value={cause.dataNeeded} onChange={(v) => updateCause(index, { dataNeeded: v })} textarea/><Field label="成立/不成立标准" value={cause.decisionRule} onChange={(v) => updateCause(index, { decisionRule: v })} textarea/><Field label="责任人" value={cause.owner} onChange={(v) => updateCause(index, { owner: v })}/><div className="field"><label>完成日期</label><input type="date" value={cause.dueDate} onChange={(event) => updateCause(index, { dueDate: event.target.value })}/></div><Field label="验证结果与证据" value={cause.result} onChange={(v) => updateCause(index, { result: v })} placeholder="填写数据结果、现场记录或试验结论" full textarea/></div></article>; })}</div></details>)}</div>
       <button className="btn blue" style={{ marginTop: 20 }} disabled={!supported || running === "solutions"} onClick={generateSolutions}>{running === "solutions" ? <span className="spinner"/> : <Sparkles size={17}/>}为已验证原因生成方案</button>
     </>}
   </>;
+}
+
+function ImprovementStage({ item, update, updateMeasure, generateSolutions, generateToBe, running, goNext }: { item: QccCase; update: (item: QccCase) => void; updateMeasure: (index: number, patch: Partial<Countermeasure>) => void; generateSolutions: () => void; generateToBe: (mode: "COPY" | "AI", replace?: boolean) => void; running: string | null; goNext: () => void }) {
+  const [section, setSection] = useState<"tobe" | "details">(item.countermeasures.length ? "details" : "tobe");
+  const previousMeasureCount = useRef(item.countermeasures.length);
+  useEffect(() => { if (previousMeasureCount.current === 0 && item.countermeasures.length > 0) setSection("details"); previousMeasureCount.current = item.countermeasures.length; }, [item.countermeasures.length]);
+  return <><div className="step-intro"><div><h2>改善方案</h2><p>用TO BE流程呈现未来怎么运行，同时保留原有的详细方案说明。</p></div></div><div className="improvement-tabs"><button className={section === "tobe" ? "active" : ""} onClick={() => setSection("tobe")}><GitBranch size={18}/><span><strong>TO BE流程</strong><small>绘制、对照与追溯流程变更</small></span></button><button className={section === "details" ? "active" : ""} onClick={() => setSection("details")}><Lightbulb size={18}/><span><strong>详细方案说明 {item.countermeasures.length > 0 && <em className="count-dot">{item.countermeasures.length}</em>}</strong><small>实施动作、责任、指标、风险与回退</small></span></button></div>{section === "tobe" ? <section className="panel"><ToBeWorkbench item={item} update={update} generate={generateToBe} running={running === "tobe"}/></section> : <SolutionStage item={item} updateMeasure={updateMeasure} generateSolutions={generateSolutions} running={running} goNext={goNext}/>} {section === "tobe" && <div style={{ marginTop: 18 }}><button className="btn primary" onClick={() => setSection("details")}>查看详细方案说明{item.countermeasures.length ? `（${item.countermeasures.length}项）` : ""}</button></div>}</>;
 }
 
 function SolutionStage({ item, updateMeasure, generateSolutions, running, goNext }: { item: QccCase; updateMeasure: (index: number, patch: Partial<Countermeasure>) => void; generateSolutions: () => void; running: string | null; goNext: () => void }) {
@@ -384,14 +396,16 @@ function SolutionStage({ item, updateMeasure, generateSolutions, running, goNext
 function ReportStage({ item, copyA3 }: { item: QccCase; copyA3: () => void }) {
   const supported = item.hypotheses.filter((h) => h.status === "证据支持");
   const highFindings = item.findings.filter((f) => f.priority === "高");
+  const categoryCounts = problemCategories.map((category) => ({ category, count: item.processFacts.filter((fact) => fact.problemCategory === category).length }));
+  const activeCategories = categoryCounts.filter((entry) => entry.count > 0).length;
+  const toBeItem = item.toBeProcess ? { ...item, steps: item.toBeProcess.steps, transitions: item.toBeProcess.transitions, processFacts: [] } : null;
   return <><div className="step-intro no-print"><div><h2>报告与交付</h2><p>导出内容可直接用于QCC辅导、阶段评审和A3更新。</p></div></div>
     <div className="export-actions no-print" style={{ marginBottom: 18 }}><a className="btn blue" href={`/api/cases/${item.id}/export`}><Download size={16}/>下载Excel诊断包</a><button className="btn ghost" onClick={() => window.print()}><Printer size={16}/>打印/保存PDF</button><button className="btn ghost" onClick={copyA3}><Clipboard size={16}/>复制A3文本</button></div>
     <article className="panel report-cover"><div className="report-title"><div><span className="eyebrow">QCC PROCESS DIAGNOSTIC</span><h2>{item.title}</h2><p style={{ color: "var(--muted)", margin: 0 }}>{item.problemType}问题 · {item.processStart} → {item.processEnd}</p></div><span className="badge blue">{item.engine || "尚未诊断"}</span></div>
-      <div className="report-summary"><div className="summary-cell"><span>核心指标</span><strong>{item.metric || "待补充"}</strong></div><div className="summary-cell"><span>基线 → 目标</span><strong>{item.baseline || "-"} → {item.target || "-"}</strong></div><div className="summary-cell"><span>流程断点</span><strong>{item.findings.length}项</strong></div><div className="summary-cell"><span>证据支持原因</span><strong>{supported.length}项</strong></div></div>
-      <section className="report-section"><h3>问题事实</h3><p>{item.object}在{item.location}，{item.period}发生{item.frequency}。造成的经营影响为：{item.impact}。</p><p style={{ color: "var(--muted)" }}>统计口径：{item.dataDefinition}</p></section>
-      <section className="report-section"><h3>高优先级流程断点</h3><ol className="report-list">{highFindings.length ? highFindings.map((f) => <li key={f.id}><strong>{f.stepName}｜{f.category}</strong>：{f.title}。{f.question}</li>) : <li>尚未完成断点诊断。</li>}</ol></section>
-      <section className="report-section"><h3>证据支持的原因</h3><ol className="report-list">{supported.length ? supported.map((h) => <li key={h.id}><strong>{h.kind}</strong>：{h.statement}。验证证据：{h.result}</li>) : <li>尚无原因获得证据支持，当前不应进入方案实施。</li>}</ol></section>
-      <section className="report-section"><h3>优先改善方案</h3><ol className="report-list">{item.countermeasures.length ? [...item.countermeasures].sort((a,b) => b.totalScore-a.totalScore).slice(0,6).map((m) => <li key={m.id}><strong>[{m.type}｜{m.totalScore}分]</strong> {m.action}；试点：{m.pilotScope}；成功标准：{m.successMetric}。</li>) : <li>需完成原因验证后生成。</li>}</ol></section>
+      <section className="report-section report-block"><div className="report-block-head"><span>01</span><div><h3>问题与流程</h3><p>指标、流程边界与AS IS运行方式</p></div></div><div className="report-summary three"><div className="summary-cell"><span>核心指标</span><strong>{item.metric || "待补充"}</strong><small>口径：{item.dataDefinition || "待补充"}</small></div><div className="summary-cell"><span>基线 → 目标</span><strong>{item.baseline || "-"} → {item.target || "-"}</strong><small>期间：{item.period || "待补充"}</small></div><div className="summary-cell"><span>流程边界</span><strong>{item.processStart || "-"} → {item.processEnd || "-"}</strong><small>责任人：{item.processOwner || "待补充"}</small></div></div><h4>AS IS流程图</h4><FlowDiagram item={item}/></section>
+      <section className="report-section report-block"><div className="report-block-head"><span>02</span><div><h3>现状诊断</h3><p>问题分类、主要问题与诊断结论</p></div></div><div className="diagnosis-count-head"><strong>共识别{activeCategories}类、{item.processFacts.length}项问题</strong><span>高优先级诊断{highFindings.length}项</span></div><div className="report-category-grid">{categoryCounts.map(({ category, count }) => <div key={category}><span>{category}</span><strong>{count}项</strong><small>{category === "流程类" ? "流程交接、节点流程、全流程" : category === "管理规则类" ? "策略及规则、制度等" : category === "组织类" ? "职责、权限与协同" : "系统、数据与接口"}</small></div>)}</div><div className="report-conclusions"><div><strong>主要问题</strong><p>{item.processFacts.slice(0, 3).map((fact) => fact.description).join("；") || "尚未记录流程问题。"}</p></div><div><strong>现状诊断结论</strong><p>{highFindings.slice(0, 4).map((finding) => `${finding.dimension}：${finding.title}`).join("；") || "尚未完成现状诊断。"}</p></div><div><strong>业务影响</strong><p>{item.impact || "待补充经营影响。"}</p></div></div></section>
+      <section className="report-section report-block"><div className="report-block-head"><span>03</span><div><h3>根因验证</h3><p>仅呈现获得证据支持的原因</p></div></div><div className="diagnosis-count-head"><strong>{item.hypotheses.length}项原因假设中，{supported.length}项获得证据支持</strong><span>{item.hypotheses.filter((cause) => cause.status !== "待验证").length}/{item.hypotheses.length}已判定</span></div><ol className="report-list">{supported.length ? supported.map((cause) => <li key={cause.id}><strong>{cause.kind}｜{cause.stepName}</strong>：{cause.statement}。验证证据：{cause.result}</li>) : <li>尚无原因获得证据支持，当前不应进入方案实施。</li>}</ol></section>
+      <section className="report-section report-block"><div className="report-block-head"><span>04</span><div><h3>改善方案</h3><p>TO BE流程及详细方案说明</p></div></div><h4>TO BE流程图</h4>{toBeItem ? <FlowDiagram item={toBeItem}/> : <div className="empty-report-flow">尚未设计TO BE流程。</div>}<div className="report-conclusions"><div><strong>流程变更</strong><p>{item.toBeProcess?.changes.map((change) => `[${change.changeType}] ${change.description}`).join("；") || "尚未形成流程变更。"}</p></div></div><div className="report-measures">{item.countermeasures.length ? [...item.countermeasures].sort((a,b) => b.totalScore-a.totalScore).map((measure) => <article key={measure.id}><div><span className="badge blue">{measure.type}</span><strong>{measure.action}</strong></div><p>试点：{measure.pilotScope}；责任：{measure.ownerRole}；周期：{measure.cycle}</p><p>成功指标：{measure.successMetric}；风险：{measure.risk}；回退：{measure.rollback}</p></article>) : <p>需完成原因验证后生成详细改善方案。</p>}</div></section>
       <div className="callout info" style={{ marginTop: 26, marginBottom: 0 }}><CheckCircle2 size={18}/><div>本报告用于形成诊断假设和试点方案，不替代现场调查、数据验证及辅导员评审。</div></div>
     </article>
   </>;
