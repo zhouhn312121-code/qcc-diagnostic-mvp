@@ -55,6 +55,7 @@ export function diagnoseWithRules(item: QccCase): { findings: ProcessFinding[]; 
         impactMetric: item.metric || "待补充核心指标", completeness: completeness(step), question: advice.question,
         priority: category === "控制" || category === "交接" ? "高" : category === "责任" || category === "异常闭环" ? "中" : "低",
         anchorType: "NODE", anchorId: step.id, factIds: linkedFacts.map((fact) => fact.id),
+        evidenceLevel: linkedFacts.length ? "结构与事实相互印证" : "仅流程结构",
       });
     }
   }
@@ -71,6 +72,7 @@ export function diagnoseWithRules(item: QccCase): { findings: ProcessFinding[]; 
       evidence: `异常事实“${fact.description}”${fact.frequency ? `；频次：${fact.frequency}` : ""}${fact.impact ? `；影响：${fact.impact}` : ""}。`,
       impactMetric: item.metric || "待补充核心指标", completeness: fact.evidenceStatus === "已确认" ? 100 : 80, question: advice.question,
       priority: "高", anchorType: fact.anchorType, anchorId: fact.anchorId, factIds: [fact.id],
+      evidenceLevel: fact.evidenceStatus === "已确认" ? "事实支持" : "待补证",
     });
   }
   const priorityRank = { 高: 3, 中: 2, 低: 1 };

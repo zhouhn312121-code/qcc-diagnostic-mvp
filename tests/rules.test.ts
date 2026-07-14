@@ -182,8 +182,8 @@ describe("QCC diagnosis guardrails", () => {
       { id: "fact_global", anchorType: "GLOBAL", anchorId: "global", anchorLabel: "全流程", description: "缺少统一超时升级", frequency: "持续", impact: "周期延长", evidenceType: "访谈", evidenceNote: "", evidenceSource: "流程负责人", evidencePeriod: "", sampleSize: "5", evidenceStatus: "已确认", attachmentName: "" },
     );
     const result = diagnoseWithRules(item);
-    expect(result.findings.some((finding) => finding.anchorType === "EDGE" && finding.factIds?.includes("fact_edge"))).toBe(true);
-    expect(result.findings.some((finding) => finding.anchorType === "GLOBAL" && finding.factIds?.includes("fact_global"))).toBe(true);
+    expect(result.findings.some((finding) => finding.anchorType === "EDGE" && finding.factIds?.includes("fact_edge") && finding.evidenceLevel === "事实支持")).toBe(true);
+    expect(result.findings.some((finding) => finding.anchorType === "GLOBAL" && finding.factIds?.includes("fact_global") && finding.evidenceLevel === "事实支持")).toBe(true);
   });
 
   it("migrates legacy rule facts and process locations idempotently", () => {
@@ -200,7 +200,15 @@ describe("QCC diagnosis guardrails", () => {
     const item = sampleCases()[0];
     item.processFacts.push({ id: "free_node", anchorType: "NODE", anchorId: "global", anchorLabel: "订单评审节点", locationText: "订单评审节点", processLocationType: "节点流程", description: "评审平均等待两天", frequency: "8/30", impact: "交付延期", evidenceType: "数据", evidenceNote: "", evidenceSource: "订单记录", evidencePeriod: "近3月", sampleSize: "30", evidenceStatus: "已确认", attachmentName: "", problemCategory: "流程类", problemTag: "等待" });
     const result = diagnoseWithRules(item);
-    expect(result.findings.some((finding) => finding.factIds?.includes("free_node") && finding.stepName === "订单评审节点")).toBe(true);
+    expect(result.findings.some((finding) => finding.factIds?.includes("free_node") && finding.stepName === "订单评审节点" && finding.evidenceLevel === "事实支持")).toBe(true);
+  });
+
+  it("marks findings without linked facts as process-structure evidence", () => {
+    const item = sampleCases()[0];
+    item.processFacts = [];
+    const result = diagnoseWithRules(item);
+    expect(result.findings.length).toBeGreaterThan(0);
+    expect(result.findings.every((finding) => finding.evidenceLevel === "仅流程结构")).toBe(true);
   });
 
   it("uses structural completeness instead of a fixed five-step diagnosis gate", () => {
