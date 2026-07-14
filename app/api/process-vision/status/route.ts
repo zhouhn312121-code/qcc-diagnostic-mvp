@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
+import { qwenVisionConfig, qwenVisionConfigured } from "@/lib/qwen-vision";
 
 export async function GET() {
+  const config = qwenVisionConfig();
   return NextResponse.json({
-    configured: Boolean(process.env.VISION_API_BASE_URL && process.env.VISION_API_KEY && process.env.VISION_MODEL),
-    model: process.env.VISION_MODEL || null,
+    configured: qwenVisionConfigured(), provider: config.provider, region: config.region, model: config.model,
+    supports: ["PNG", "JPG", "WebP", "PDF（最多5页）"], maxFileMB: 10,
   });
 }

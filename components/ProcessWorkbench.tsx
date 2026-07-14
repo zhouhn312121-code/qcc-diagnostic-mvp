@@ -8,6 +8,7 @@ import { makeId } from "@/lib/ids";
 import { problemCategories, processLocationTypes, type ProcessFact, type ProcessLocationType, type ProcessStep, type ProcessTransition, type QccCase, type ToBeProcess } from "@/lib/types";
 import type { MaterialCandidate } from "@/lib/materials";
 import { DrawioWorkbench } from "@/components/DrawioWorkbench";
+import { validateVisionProcess, visionResultToProcess, type VisionProcessResult } from "@/lib/process-vision";
 
 type NodeData = { label: string; owner: string; nodeType: ProcessStep["nodeType"]; issueCount: number; onSelect?: () => void };
 function FlowNode({ data, selected }: NodeProps<Node<NodeData>>) { return <div onClick={data.onSelect} className={`flow-edit-node ${data.nodeType.toLowerCase()} ${selected ? "selected" : ""}`}><Handle className="connect-handle target" type="target" position={Position.Left}/><small>{data.owner || "待指定"}</small><strong>{data.label || "未命名步骤"}</strong>{data.issueCount > 0 && <em><AlertTriangle size={10}/>{data.issueCount}</em>}<Handle className="connect-handle source" type="source" position={Position.Right}/><span className="connect-tip">从右侧端口拖出连线</span></div>; }
@@ -72,19 +73,67 @@ function TransitionEditor({ step, steps, transitions, change }: { step: ProcessS
   return <section className="transition-editor"><div><strong>流转关系</strong><button type="button" onClick={add} disabled={!targets.length || step.nodeType === "END"}><Plus size={12}/>添加</button></div>{step.nodeType === "END" ? <p>结束节点不能设置后续流转。</p> : outgoing.length ? outgoing.map((transition, index) => <article key={transition.id}><header><b>{step.nodeType === "DECISION" ? `分支 ${index + 1}` : "下一步"}</b><button type="button" aria-label="删除流转" onClick={() => change(transitions.filter((candidate) => candidate.id !== transition.id))}><X size={12}/></button></header><label>流转至<select value={transition.targetNodeId} onChange={(event) => patch(transition.id, { targetNodeId: event.target.value })}>{targets.map((target) => <option key={target.id} value={target.id}>{target.name || `步骤${target.order}`}</option>)}</select></label>{step.nodeType === "DECISION" && <><label>分支名称<input value={transition.branchName} placeholder="例如：是 / 否" onChange={(event) => patch(transition.id, { branchName: event.target.value, transitionType: "CONDITION" })}/></label><label>判断条件<input value={transition.conditionExpression} placeholder="例如：库存≥需求量" onChange={(event) => patch(transition.id, { conditionExpression: event.target.value })}/></label></>}</article>) : <p>尚未设置后续流转，请点击“添加”选择下一节点。</p>}</section>;
 }
 
-export function UploadSimulator({ onUseCurrent }: { onUseCurrent: () => void }) {
-  const [configured, setConfigured] = useState(false);
+export function UploadSimulator({ onUseCurrent, onApply }: { onUseCurrent: () => void; onApply: (steps: ProcessStep[], transitions: ProcessTransition[]) => void }) {
+  const [service, setService] = useState<{ configured: boolean; provider?: string; model?: string }>({ configured: false });
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState("");
-  useEffect(() => { void fetch("/api/process-vision/status").then((response) => response.json()).then((data) => setConfigured(Boolean(data.configured))).catch(() => setConfigured(false)); }, []);
+  const [recognizing, setRecognizing] = useState(false);
+  const [result, setResult] = useState<VisionProcessResult | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => { void fetch("/api/process-vision/status").then((response) => response.json()).then((data) => setService({ configured: Boolean(data.configured), provider: data.provider, model: data.model })).catch(() => setService({ configured: false })); }, []);
   useEffect(() => {
     if (!file || !file.type.startsWith("image/")) { setPreview(""); return; }
     const url = URL.createObjectURL(file); setPreview(url); return () => URL.revokeObjectURL(url);
   }, [file]);
+  const validationIssues = result ? validateVisionProcess(result) : [];
+  async function recognize() {
+    if (!file) return;
+    setRecognizing(true); setError(""); setResult(null);
+    try {
+      const form = new FormData(); form.append("file", file);
+      const response = await fetch("/api/process-vision/analyze", { method: "POST", body: form });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "流程图识别失败");
+      setResult(data.result);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "流程图识别失败"); }
+    finally { setRecognizing(false); }
+  }
+  function patchNode(id: string, patch: Partial<VisionProcessResult["nodes"][number]>) {
+    if (!result) return; setResult({ ...result, nodes: result.nodes.map((node) => node.id === id ? { ...node, ...patch } : node) });
+  }
+  function patchTransition(id: string, patch: Partial<VisionProcessResult["transitions"][number]>) {
+    if (!result) return; setResult({ ...result, transitions: result.transitions.map((edge) => edge.id === id ? { ...edge, ...patch } : edge) });
+  }
+  function addNode() {
+    if (!result || result.nodes.length >= 20) return;
+    setResult({ ...result, nodes: [...result.nodes, { id: makeId("vision-node"), name: "新活动", nodeType: "ACTION", owner: "", lane: "", input: "", activity: "", output: "", standard: "", confidence: 1 }] });
+  }
+  function removeNode(id: string) {
+    if (!result) return;
+    setResult({ ...result, nodes: result.nodes.filter((node) => node.id !== id), transitions: result.transitions.filter((edge) => edge.sourceNodeId !== id && edge.targetNodeId !== id) });
+  }
+  function addTransition() {
+    if (!result || result.nodes.length < 2) return;
+    setResult({ ...result, transitions: [...result.transitions, { id: makeId("vision-edge"), sourceNodeId: result.nodes[0].id, targetNodeId: result.nodes[1].id, branchName: "", conditionExpression: "", confidence: 1 }] });
+  }
+  function apply() {
+    if (!result || validationIssues.length) return;
+    if (!window.confirm(`确认用识别出的${result.nodes.length}个节点和${result.transitions.length}条连线替换当前AS IS流程？`)) return;
+    const process = visionResultToProcess(result); onApply(process.steps, process.transitions);
+  }
   return <div className="vision-upload">
-    <div className="vision-upload-head"><div><strong>上传已有流程图</strong><p>支持PNG、JPG、WebP和PDF。AI只生成候选结构，人工确认后才应用到正式AS IS。</p></div><span className={`badge ${configured ? "green" : "gray"}`}>{configured ? "视觉服务已配置" : "视觉API待配置"}</span></div>
-    <label className="vision-drop"><FileImage size={32}/><strong>{file ? file.name : "选择流程图图片或PDF"}</strong><span>{file ? `${Math.ceil(file.size / 1024)} KB` : "文件只用于本次识别；未确认前不会修改正式流程"}</span><span className="btn blue"><Upload size={15}/>选择文件</span><input type="file" accept="image/png,image/jpeg,image/webp,.pdf" onChange={(event) => setFile(event.target.files?.[0] || null)}/></label>
-    {file && <div className="vision-preview">{preview ? <img src={preview} alt="待识别流程图预览"/> : <div><FileImage size={28}/><strong>{file.name}</strong><span>PDF将在视觉服务接入后逐页识别</span></div>}<div className="vision-status"><strong>{configured ? "文件已就绪，可以开始视觉识别" : "尚未配置视觉识别服务"}</strong><p>{configured ? "识别结果将进入节点、连线、泳道和不确定项确认。" : "当前不会模拟识别成功。你仍可参考原图，在智能流程搭建或draw.io中人工还原。"}</p><div><button className="btn ghost" onClick={onUseCurrent}>转到智能流程搭建</button><button className="btn primary" disabled={!configured}><Sparkles size={15}/>开始AI识图</button></div></div></div>}
+    <div className="vision-upload-head"><div><strong>上传已有流程图</strong><p>支持PNG、JPG、WebP和PDF（最多5页）。AI只生成候选结构，人工确认后才应用到正式AS IS。</p></div><span className={`badge ${service.configured ? "green" : "gray"}`}>{service.configured ? `${service.provider} · ${service.model}` : "视觉API待配置"}</span></div>
+    <label className="vision-drop"><FileImage size={32}/><strong>{file ? file.name : "选择流程图图片或PDF"}</strong><span>{file ? `${Math.ceil(file.size / 1024)} KB` : "文件只用于本次识别；未确认前不会修改正式流程"}</span><span className="btn blue"><Upload size={15}/>选择文件</span><input type="file" accept="image/png,image/jpeg,image/webp,.pdf" onChange={(event) => { setFile(event.target.files?.[0] || null); setResult(null); setError(""); }}/></label>
+    {file && !result && <div className="vision-preview">{preview ? <img src={preview} alt="待识别流程图预览"/> : <div><FileImage size={28}/><strong>{file.name}</strong><span>将逐页识别PDF中的节点、箭头和泳道</span></div>}<div className="vision-status"><strong>{service.configured ? "文件已就绪，可以开始视觉识别" : "尚未配置视觉识别服务"}</strong><p>{service.configured ? "识别结果将进入节点、连线、泳道和不确定项确认。" : "配置VISION_API_KEY后即可调用千问视觉模型；当前仍可人工还原。"}</p>{error && <p className="vision-error">{error}</p>}<div><button className="btn ghost" onClick={onUseCurrent}>转到智能流程搭建</button><button className="btn primary" disabled={!service.configured || recognizing} onClick={() => void recognize()}><Sparkles size={15}/>{recognizing ? "正在识别…" : "开始AI识图"}</button></div></div></div>}
+    {result && <section className="vision-result">
+      <div className="vision-result-head"><div><strong>识别结果确认</strong><p>{result.summary || "请逐项核对节点与箭头。空缺的业务字段可应用后在流程明细中补充。"}</p></div><div><span>{result.lanes.length}个泳道</span><span>{result.nodes.length}个节点</span><span>{result.transitions.length}条连线</span></div></div>
+      {validationIssues.length > 0 && <div className="callout warn"><AlertTriangle size={17}/><div><strong>应用前需修正流程结构</strong><ul className="issues">{validationIssues.map((issue) => <li key={issue}>{issue}</li>)}</ul></div></div>}
+      <div className="vision-subhead"><strong>识别节点</strong><button className="btn ghost" disabled={result.nodes.length >= 20} onClick={addNode}><Plus size={13}/>补充节点</button></div>
+      <div className="vision-table-wrap"><table className="vision-confirm-table"><thead><tr><th>类型</th><th>节点名称</th><th>责任/泳道</th><th>输入</th><th>实际活动</th><th>输出</th><th>标准/时限</th><th>置信度</th><th></th></tr></thead><tbody>{result.nodes.map((node) => <tr key={node.id}><td><select value={node.nodeType} onChange={(event) => patchNode(node.id, { nodeType: event.target.value as typeof node.nodeType })}><option value="START">开始</option><option value="ACTION">活动</option><option value="DECISION">判断</option><option value="END">结束</option></select></td><td><input value={node.name} onChange={(event) => patchNode(node.id, { name: event.target.value })}/></td><td><input value={node.owner || node.lane} onChange={(event) => patchNode(node.id, { owner: event.target.value, lane: event.target.value })}/></td><td><input value={node.input} onChange={(event) => patchNode(node.id, { input: event.target.value })}/></td><td><input value={node.activity} onChange={(event) => patchNode(node.id, { activity: event.target.value })}/></td><td><input value={node.output} onChange={(event) => patchNode(node.id, { output: event.target.value })}/></td><td><input value={node.standard} onChange={(event) => patchNode(node.id, { standard: event.target.value })}/></td><td>{Math.round(node.confidence * 100)}%</td><td><button className="icon-btn" title="删除识别节点" onClick={() => removeNode(node.id)}><Trash2 size={13}/></button></td></tr>)}</tbody></table></div>
+      <div className="vision-edges"><div className="vision-subhead"><strong>箭头与判断分支</strong><button className="btn ghost" onClick={addTransition}><Plus size={13}/>补充连线</button></div>{result.transitions.map((edge) => <div key={edge.id}><select value={edge.sourceNodeId} onChange={(event) => patchTransition(edge.id, { sourceNodeId: event.target.value })}>{result.nodes.map((node) => <option key={node.id} value={node.id}>{node.name}</option>)}</select><span>→</span><select value={edge.targetNodeId} onChange={(event) => patchTransition(edge.id, { targetNodeId: event.target.value })}>{result.nodes.map((node) => <option key={node.id} value={node.id}>{node.name}</option>)}</select><input placeholder="分支名称（是/否）" value={edge.branchName} onChange={(event) => patchTransition(edge.id, { branchName: event.target.value })}/><input placeholder="判断条件" value={edge.conditionExpression} onChange={(event) => patchTransition(edge.id, { conditionExpression: event.target.value })}/><button className="icon-btn" title="删除识别连线" onClick={() => setResult({ ...result, transitions: result.transitions.filter((candidate) => candidate.id !== edge.id) })}><Trash2 size={13}/></button></div>)}</div>
+      {result.uncertainties.length > 0 && <div className="vision-uncertainties"><strong>需要人工确认（{result.uncertainties.length}）</strong>{result.uncertainties.map((item) => <p key={item.id}><HelpCircle size={14}/><span>{item.question}{item.suggestion ? `；建议：${item.suggestion}` : ""}</span><small>{Math.round(item.confidence * 100)}%</small></p>)}</div>}
+      <div className="vision-actions"><button className="btn ghost" onClick={() => setResult(null)}>重新识别</button><button className="btn primary" disabled={validationIssues.length > 0} onClick={apply}>确认并应用到AS IS</button></div>
+    </section>}
   </div>;
 }
 
