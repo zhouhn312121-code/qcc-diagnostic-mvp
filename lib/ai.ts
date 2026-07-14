@@ -90,7 +90,10 @@ export async function diagnoseWithAi(item: QccCase, model: string): Promise<{ fi
     process: { start: item.processStart, end: item.processEnd, owner: item.processOwner, steps: item.steps.filter((step) => step.nodeType !== "END"), transitions: item.transitions, facts: item.processFacts },
   });
   const parsed = diagnosisSchema.parse(raw);
-  const findings = parsed.findings.map((finding) => ({ ...finding, id: makeId("finding"), anchorType: "NODE" as const, anchorId: finding.stepId, factIds: item.processFacts.filter((fact) => fact.anchorType === "NODE" && fact.anchorId === finding.stepId).map((fact) => fact.id) }));
+  const findings = parsed.findings.map((finding) => {
+    const factIds = item.processFacts.filter((fact) => fact.anchorType === "NODE" && fact.anchorId === finding.stepId).map((fact) => fact.id);
+    return { ...finding, id: makeId("finding"), anchorType: "NODE" as const, anchorId: finding.stepId, factIds, evidenceLevel: factIds.length ? "结构与事实相互印证" as const : "仅流程结构" as const };
+  });
   const hypotheses = parsed.hypotheses.map((hypothesis) => ({
     id: makeId("cause"), findingId: findings[hypothesis.findingIndex]?.id || findings[0].id, stepName: hypothesis.stepName,
     kind: hypothesis.kind, statement: hypothesis.statement, rationale: hypothesis.rationale, verificationMethod: hypothesis.verificationMethod,

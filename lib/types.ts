@@ -109,6 +109,7 @@ export interface ProcessFinding {
   anchorType?: ProcessFactAnchor;
   anchorId?: string;
   factIds?: string[];
+  evidenceLevel?: "仅流程结构" | "事实支持" | "结构与事实相互印证" | "待补证";
 }
 
 export interface CauseHypothesis {
